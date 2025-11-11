@@ -13,6 +13,8 @@ Finally, as supplementary materials, the repository also includes:
 - the dataset containing out-of-hospital deaths, and
 - two additional R scripts with the code used to reproduce the infection and survival indicators.
 
+## References
+
 Gámiz, M. L., Mammen, E., Martínez-Miranda, M. D., and Nielsen, J. P. (2025a).
 *Low quality exposure and point processes with a view to the first phase of a pandemic.*
 
