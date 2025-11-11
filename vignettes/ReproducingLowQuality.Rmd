@@ -1,0 +1,1610 @@
+---
+title: "Reproducing Gámiz, Mammen, Martínez-Miranda and Nielsen (2025) using the `pandemics` package"
+author: ""
+date: ""
+output: pdf_document
+---
+
+
+```{r setup, include=FALSE, cache=FALSE}
+library(knitr)
+# set global chunk options
+opts_chunk$set(fig.align='center', fig.show='hold')
+options(formatR.arrow=TRUE,width=70)
+```
+
+
+\newpage
+
+\tableofcontents
+
+\newpage
+
+
+```{r echo=FALSE,include=FALSE, message=FALSE, warning=FALSE}
+load("C:/Users/34619/Dropbox/1_German_compartido/pandemics_new_version/pandemics/data/covid.Rda")
+```
+
+
+```{r echo=FALSE,include=FALSE, message=FALSE, warning=FALSE}
+############ day-effect:
+## koyama: day effect:
+week_effect<-function(Ni)
+{ ## dates: a vector with dates
+  ## Ni= vector with daily number of positive registered
+  M<-length(Ni)
+  day_index<-gl(7,1,labels=1:7,length=M)
+  n<-sum(Ni)
+  freq<-wei<-double(7)
+  i<-0
+  while(i<7)
+  {i<-i+1
+  freq[i]<-sum(Ni[day_index==i])
+  }
+  wei<-7*freq/n
+  n1<-M%/%7;n2<-M%%7
+  # weis<-c(rep(wei,n1),wei[1:n2])
+  if(n2==0){weis<-rep(wei,n1)}else{weis<-c(rep(wei,n1),wei[1:n2])}
+  Ni.w<-Ni/weis
+  return(Ni.w)
+}
+
+################################################################################
+##### Hazard/rates estimation
+################################################################################
+
+####
+## 2-dimensional local linear hazard with full information
+####
+hazard2D<-function(t.grid,z.grid,o.zt,e.zt,bs.grid,cv=FALSE)
+{
+  O.tz<-t(o.zt)
+  E.tz<-t(e.zt)
+
+  # Univariate kernel: sextic kernel
+  K<-function(u) { return(((3003/2048)*(1-(u)^2)^6)*(abs(u)<1))}
+
+  ## 1. Compute kernel evaluations and moments of the kernel
+  ## 1.1. Kernel evaluations at dimension t
+  M<-length(t.grid)
+  Tt<-matrix(rep(t.grid, times=M),nrow = M, ncol = M,byrow=FALSE)
+  # Tt is an MxM matrix with the values of the grid
+  Tx<-Tt-t(Tt)
+  nb<-nrow(bs.grid)
+  K.bt<-array(0,dim=c(M,M,nb))
+  # each element of K.bt is the Kernel evaluated at ut below
+  ut<-array(0,dim=c(M,M,nb))
+  for(b in 1:nb)
+  {
+    ut[,,b]=Tx/bs.grid[b,2]
+    K.bt[,,b]<-apply(ut[,,b],1:2,K)
+    #this works and returns the value of the Kernel function at each individual value of the array ut
+    K.bt[,,b]<-K.bt[,,b]/(bs.grid[b,2])
+  }
+
+  ## 1.2. Dimension z (evaluation points are the same but bandwidth not necessarily)
+  if (any(t.grid!=z.grid)){
+    Zt<-matrix(rep(z.grid, times=M),nrow = M, ncol = M,byrow=FALSE)
+    Zx<-Zt-t(Zt)
+  } else Zx<-Tx
+  K.bz<-array(0,dim=c(M,M,nb))
+  ut<-array(0,dim=c(M,M,nb))
+  for(b in 1:nb)
+  {
+    ut[,,b]=Zx/bs.grid[b,1]
+    K.bz[,,b]<-apply(ut[,,b],1:2,K)
+    #this works and returns the value of the Kernel function at each individual value of the array ut
+    K.bz[,,b]<-K.bz[,,b]/(bs.grid[b,1])
+  }
+  rm(ut,Tt)
+
+  ## 1.3. Moment calculations involved in the estimator
+  c0<-c10<-c11<-d00<-d01<-d11<-det.D<-den<-array(0,dim=c(M,M,nb))
+  for (b in 1:nb)
+  {
+    c0[,,b]<-(K.bt[,,b]) %*% (E.tz) %*%t( K.bz[,,b])
+    c10[,,b]<-(K.bt[,,b] * Tx) %*% (E.tz) %*%t(K.bz[,,b])
+    c11[,,b]<-(K.bt[,,b]) %*% (E.tz) %*% t(K.bz[,,b]*Zx)
+    d00[,,b]<-(K.bt[,,b] * (Tx^2)) %*% (E.tz) %*% t(K.bz[,,b])
+    d01[,,b]<-(K.bt[,,b] * Tx) %*% (E.tz) %*% t(K.bz[,,b]*Zx)
+    d11[,,b]<-(K.bt[,,b]) %*% (E.tz) %*% t(K.bz[,,b]*(Zx^2))
+    det.D[,,b]<- d00[,,b]*d11[,,b]-d01[,,b]^2
+    den[,,b]<-det.D[,,b]*c0[,,b] -
+      ( c10[,,b]*(d11[,,b]*c10[,,b]-d01[,,b]*c11[,,b])
+        + c11[,,b]*(d00[,,b]*c11[,,b] - d01[,,b]*c10[,,b]) )
+  }
+
+  ## 2. Create a function to compute the LL hazard from results above
+  ##    and for one single bandwidth
+  hazard.b<-function(K.bt,K.bz,Tx,Zx,b,O.tz,c10,c11,d00,d01,d11,det.D,den)
+  {
+    num1<-((K.bt[,,b]) %*% (O.tz)  %*%  t(K.bz[,,b])) *(det.D[,,b])
+    num2<-( (K.bt[,,b] * Tx) %*% (O.tz)  %*%  t(K.bz[,,b]))*(d11[,,b]*c10[,,b] - d01[,,b]*c11[,,b])
+    num3<-( (K.bt[,,b]) %*% (O.tz)  %*%  t(K.bz[,,b]*Zx))*(d00[,,b]*c11[,,b] - d01[,,b]*c10[,,b])
+    num<-num1-num2-num3
+    estim<-num/den[,,b] ### alpha(t,z)
+    estim[den[,,b]==0]<-NA
+    estim<-t(estim);    ## alpha(z,t)
+    # First dimension is z= start and second is t = duration
+    ## Moreover 1 <= z <= M; and 1 <= t <= M-z+1=z2 (end)
+    ## so, we cannot estimate beyond z2, that is,
+    ##  estim.zt[z,t]=0 for t in [M-z+1, M]
+    M<-nrow(estim)
+    for (z in 2:M){for (t in (M-z+2):M){estim[z,t]<-NA}}
+    ## return a vector with dimension Mt*Mz=M^2
+    estim<-as.vector(estim)
+    estim[estim<0]<-NA
+    return(estim)
+  }
+
+  ## 3. Compute now the local linear estimator with possible CV-bandwidth
+  if(cv==TRUE & nb>1)
+  {
+    ## 3.1. The leave-one-out (loo) LL-hazard estimator
+    # Create a function similar to hazard.b but leave-one-out
+    hazard.loo.b<-function(K.bt,K.bz,Tx,Zx,b,O.tz,c10,c11,d00,d01,d11,
+                           det.D,den,M)
+    {
+      estim.ij<-double(M*M)
+      ij<-l<-0
+      for (i in 1:M)
+      {
+        for (j in 1:M)
+        {
+          l<-l+1
+          if(j>M-i+1){
+            estim.ij[l]<-NA
+          } else {
+            if (O.tz[i,j]>0) {
+              Oij.prev<-O.tz[i,j];O.tz[i,j]<- O.tz[i,j]-1;ij=1
+            }
+            num1<-( (K.bt[i,,b]) %*% (O.tz)  %*%  (K.bz[j,,b])) *(det.D[i,j,b])
+            num2<-( (K.bt[i,,b] * Tx[i,]) %*% (O.tz)  %*%  K.bz[j,,b])*(d11[i,j,b]*c10[i,j,b] - d01[i,j,b]*c11[i,j,b])
+            num3<-( (K.bt[i,,b]) %*% (O.tz)  %*%  (K.bz[j,,b]*Zx[j,]) )*(d00[i,j,b]*c11[i,j,b] - d01[i,j,b]*c10[i,j,b])
+            num<-num1-num2-num3
+            estim<-num/den[i,j,b]; estim[den[i,j,b]==0]<-NA
+            estim.ij[l]<-estim
+            if (ij>0) {O.tz[i,j]<-Oij.prev; ij=0}
+          }
+        }
+      }
+      return(estim.ij)
+    }
+
+    # Finally evaluate the above function above for each bandwidth in the grid
+    estim.loo.zt.bs<-sapply(1:nb, function(b){
+      return(hazard.loo.b(K.bt,K.bz,Tx,Zx,b,O.tz,c10,
+                          c11,d00,d01,d11,det.D,den,M))})
+    # estim.loo.zt.bs is a matrix with Mt*Mz rows and nb columns
+
+    ## 3.2. The usual estimator (not loo)
+    estim.zt.bs<-sapply(1:nb, function(b){
+      return(hazard.b(K.bt,K.bz,Tx,Zx,b,O.tz,c10,
+                      c11,d00,d01,d11,det.D,den))})
+    ## estim.zt.bs is a matrix with Mt*Mz rows and nb columns
+
+    ## 3.3. Compute the CV-banwidth choice with the above matrices
+    vec.E.zt<-as.double(e.zt)
+    vec.O.zt<-as.double(o.zt)
+    #  The cross-validation function
+    CV.b<-function(b)
+    {
+      dif1.b<-sum((estim.zt.bs[,b])^2 ,na.rm=TRUE)
+      dif2.b<-sum(estim.loo.zt.bs[,b]* (vec.O.zt/vec.E.zt),na.rm=TRUE)
+      cv.b<-dif1.b-2*dif2.b
+      if (cv.b==Inf | cv.b==0) cv.b<-NA
+      return(cv.b)
+    }
+    cv.values <- sapply(1:nb, CV.b)
+    bcv<-which.min(cv.values)
+    hi.zt<-estim.zt.bs[,bcv]
+    hi.zt<-matrix(hi.zt,M,M,byrow=FALSE)
+    hi.zt[which(hi.zt<0)]<-NA
+  } else {
+    estim.zt.b<-hazard.b(K.bt,K.bz,Tx,Zx,b=1,O.tz,c10,
+                         c11,d00,d01,d11,det.D,den)
+    hi.zt<-matrix(as.double(estim.zt.b),M,M,byrow=FALSE)
+    hi.zt[which(hi.zt<0)]<-NA
+    bcv<-1
+  }
+
+  return(list(hi.zt=hi.zt,bcv=bs.grid[bcv,]))   ### before:  bcv=t(bs.grid[bcv,])
+}
+
+####
+## Our algorithm to estimate the survival hazards from truncated data
+####
+hazard2Dmiss<-function(t.grid,z.grid,Oi1.z,Oi2.z,Ei.z,bs.grid,cv=TRUE,
+                       epsilon=1e-4,max.ite=50)
+{
+  ## sample information is as follows:
+  # Each day z, we get information on number of people remaining in hospital: Ei.z
+  # as well as deaths (Oi1.z) and recoveries (Oi2.z) on that day (z)
+  # Oi1.z= number of deaths notified on the day z;
+  # Oi2.z=number of recoveries notified on the day z
+  # Ei.z= number of people in the hospital on the day z, they have arrived at any day from 1:z;
+  
+  Oi.z<-Oi1.z+Oi2.z  # number of recoveries+deaths
+  M<-length(Oi.z)    # total number of days considered in the sample
+  
+  
+  
+  #################################################################################
+  # Construction of ocurrences and exposures
+  #################################################################################
+  
+  ## Step 1. Initialization: construct them from an initial guess (exponential)
+  
+  Ei.zt<-Oi.zt<-matrix(0,M,M)  # NOT OBSERVED! only the sums by rows are!!
+  #Oi.zt[z,t]<- number of subjects that leave the hospital (die or recover) the day z and have duration in hospital equal t
+  ## stay in hospital from the day z-t+1 to the day z;
+  ## columns are duration  (t) and  rows are the reporting day (z)
+  #Ei.zt[z,t]<- number of subjects staying in the hospital on the day z and have duration in hospital equal t
+  # they have arrived at any day in the interval (z-t+1,z) and still are in hospital on the day z
+  # columns denote duration (t) and  rows are the reporting day (z)
+  Ei.new<-Ei.z[-1]-(Ei.z[-M]-Oi.z[-M])
+  Ei.new<-c(Ei.z[1],Ei.new);
+  Ei.new[Ei.new<0]<-0   #to overcome certain data incongruences
+  Ei.zt[,1]<-as.integer(Ei.new) # new arrivals each day:
+  
+  
+  # dimension z=notification day; dimension t=duration
+  for(z in 1:M)
+  {
+    for(t in 1:(M-z+1)) ## we fill in the matrices following the diagonal-track
+    {
+      if( (Ei.zt[(z+t-1),t]>0) & (Oi.z[z+t-1]>0) )
+      {
+        Oi.zt[(z+t-1),t]<-Ei.zt[(z+t-1),t]/Oi.z[(z+t-1)]
+      } else {
+        Oi.zt[(z+t-1),t]<-0
+      }
+      if(t<(M-z+1)){
+        Ei.zt[(z+t),(t+1)]<-Ei.zt[(z+t-1),t]-Oi.zt[(z+t-1),t]
+      }
+    }
+  }
+  
+  
+  ## To estimate Oi.zt, define:
+  #  q(z,t) = O(z,t)/(sum_d' O(z,t'))
+  #  q.zt is the density of occurrences by duration t
+  #  conditioned to notification day z
+  #  From q.zt we create:
+  #  Oi.zt<- q(z,t)*Oi.z[z]
+  
+  total.Oz<-rowSums(Oi.zt)
+  q.zt<-Oi.zt/total.Oz
+  q.zt[which(is.na(q.zt))]<-0
+  Oi.zt<-q.zt*Oi.z;
+  
+  ## To estimate Ei.zt, define:
+  #  h(z,t) = E(z,t')/(sum_d E(z,t'))
+  #  h(z,t) is the density of exposure by duration t conditioned
+  #  to notification day z
+  #  From h(z,t) we construct:
+  #  Ei.zt<- sum_z h(z,t)*Ei.z[z]
+  total.Ez<-rowSums(Ei.zt) ## = Ei.z #the exposure by date (z)
+  h.zt<-Ei.zt/total.Ez
+  h.zt[is.na(h.zt)]<-0
+  Ei.zt<-h.zt*Ei.z;
+  
+  Oi.zt[Ei.zt==0]<-0
+  
+  ## Rearrange the matrices to compute local linear estimators
+  ## each row is marked by the date the subjects enter the hospital
+  ## the matrices are triangular with no element below the secondary diagonal
+  oi.zt<-matrix(0,M,M)
+  ei.zt<-matrix(0,M,M)
+  for(z in 1:M)
+  {
+    for(t in 1:(M-z+1))
+    {
+      ei.zt[z,t]<-Ei.zt[(z+t-1),t]
+      oi.zt[z,t]<-Oi.zt[(z+t-1),t]
+    }
+  }
+  
+  est0<-hazard2D(t.grid,z.grid,o.zt=oi.zt,e.zt=ei.zt,bs.grid,cv=TRUE)
+  hi.zt.0<-est0$hi.zt
+  bcv0<-est0$bcv
+  
+  ## Step 2. Iterations until convergence or stopping criteria
+  
+  tol<-1 #initial tolerance: max(abs(alphai.zt-hi.zt)/alphai.zt,na.rm=T)
+  it<-0
+  while((tol>epsilon) & (it<max.ite))
+  {
+    it<-it+1
+    hi.zt<-hi.zt.0
+    bcv<-bcv0
+    # Repeat step 1 but with estimated hazard for duration
+    Oi.zt<-Ei.zt<-Si.zt<-pi.zt<-S0i.zt<-matrix(0,M,M)
+    for(z in 1:M){
+      Si.zt[z,]<-exp(-cumsum(hi.zt[z,]))
+      S0i.zt[z,]<-c(1,Si.zt[z,1:(M-1)]);
+      pi.zt[z,]<- 1-Si.zt[z,]/S0i.zt[z,];kk<-which(S0i.zt[z,]==0)
+      pi.zt[z,kk]<-1;pi.zt[z,is.na(pi.zt[z,])==T]<-1
+    }
+    Ei.zt[,1]<-as.integer(Ei.new)
+    
+    for(z in 1:M)
+    {
+      for(t in 1:(M-z+1))
+      {
+        if((Ei.zt[(z+t-1),t]>0)&(is.na(hi.zt[z,t])==FALSE)){
+          Oi.zt[(z+t-1),t]<-Ei.zt[(z+t-1),t]*pi.zt[z,t]
+        } else Oi.zt[(z+t-1),t]<-0
+        if(t<(M-z+1)){Ei.zt[(z+t),(t+1)]<-Ei.zt[(z+t-1),t]-Oi.zt[(z+t-1),t]}
+      }
+    }
+    
+    total.Oz<-rowSums(Oi.zt) # = Oi
+    total.Ez<-rowSums(Ei.zt) # = Ei
+    ####
+    
+    q.zt<-Oi.zt/total.Oz
+    h.zt<-Ei.zt/total.Ez
+    q.zt[which(is.na(q.zt))]<-0;h.zt[which(is.na(h.zt))]<-0
+    
+    Oi.zt<-q.zt*Oi.z
+    Ei.zt<-h.zt*Ei.z
+    Oi.zt[Ei.zt==0]<-0
+    
+    oi.zt<-matrix(0,M,M)
+    ei.zt<-matrix(0,M,M)
+    
+    for(z in 1:M)
+    {
+      for(t in 1:(M-z+1))
+      {
+        ei.zt[z,t]<-Ei.zt[(z+t-1),t]
+        oi.zt[z,t]<-Oi.zt[(z+t-1),t]
+      }
+    }
+    
+    if (it<5){
+      est<-hazard2D(t.grid,z.grid,o.zt=oi.zt,e.zt=ei.zt,bs.grid,cv=TRUE)
+      hi.zt<-est$hi.zt
+      bcv<-est$bcv
+    } else {
+      est<-hazard2D(t.grid,z.grid,o.zt=oi.zt,e.zt=ei.zt,
+                    bs.grid=t(bcv),cv=FALSE) ## corrected 6th Feb 2024
+      hi.zt<-est$hi.zt
+    }
+    
+    tol<-(sum( (hi.zt.0-hi.zt)^2,na.rm=T))/(sum(hi.zt.0^2,na.rm=T)+1e-6)
+    hi.zt.0<-hi.zt
+    message('Iteration ',it, '. Tolerance=',tol)
+    
+  }
+  
+  ## Step 3 (final): estimate hazard for deaths and recoveries separately
+  
+  Oi1.zt<-q.zt*Oi1.z
+  Oi2.zt<-q.zt*Oi2.z
+  oi1.zt<-oi2.zt<-ei.zt<-matrix(0,M,M)
+  for(z in 1:M)
+  {
+    for(t in 1:(M-z+1))
+    {
+      ei.zt[z,t]<-Ei.zt[(z+t-1),t]
+      oi1.zt[z,t]<-Oi1.zt[(z+t-1),t]
+      oi2.zt[z,t]<-Oi2.zt[(z+t-1),t]
+    }
+  }
+  ## hazard estimate for deaths
+  if (sum(Oi1.z)==0){ hi1.zt<-NA
+  } else {
+    est1<-hazard2D(t.grid,z.grid,o.zt=oi1.zt,e.zt=ei.zt,bs.grid,cv=TRUE)
+    hi1.zt<-est1$hi.zt
+    bcv1<-est1$bcv
+  }
+  
+  ## estimate of recovery hazard:
+  if (sum(Oi2.z)==0){hi2.zt<-NA
+  } else {
+    est2<-hazard2D(t.grid,z.grid,o.zt=oi2.zt,e.zt=ei.zt,bs.grid,cv=TRUE)
+    hi2.zt<-est2$hi.zt
+    bcv2<-est2$bcv
+  }
+  
+  
+  result<-list(hi.zt=hi.zt,hi1.zt=hi1.zt,hi2.zt=hi2.zt,
+               bcv=c(bcv1,bcv2),tol=tol,it=it)
+  ## it may return also the last generated occurrences and exposure
+  # , o.zt=oi.zt,o1.zt=oi1.zt,o2.zt=oi2.zt,e.zt=ei.zt)
+  
+  return(result)
+}
+
+#   ## From the hazard we can compute other measures of interest :
+#   ## Medians of the total time until outcome depending on time (z1)
+
+# hi<-hi2.zt+hi1.zt # 2 possible outcomes
+medtime<-function(hi.zt,z1)
+{
+  hi.zt[is.na(hi.zt)]<-0
+  M<-nrow(hi.zt)
+  if (missing(z1)) z1<-c(seq(1,M-1,by=2),M-1)
+  S.list<-c()
+  n<-length(z1)
+  for(i in 1:n)
+  {
+    zi<-z1[i]
+    hi<-hi.zt[zi,]
+    Si<-list(cumprod(1-hi))
+    S.list<-c(S.list,Si)
+  }
+  v.med<-double(n)
+  times<-1:M
+  for(i in 1:n)
+  {
+    ii<-which(S.list[[i]]<0.5)
+    if (length(ii)==0) v.med[i]<-NA else v.med[i]<-times[min(ii)]
+  }
+  return(v.med)
+}
+
+#   ## 2. Probability of outcome (alive or death) depending on time (z1)
+
+poutcome<-function(hi1.zt,hi2.zt,z1)
+{
+  M<-nrow(hi1.zt)
+  if (missing(z1)) z1<-c(seq(1,M-1,by=2),M-1)
+  alive<-function(td,hid,hir)
+  {
+    Md<-length(td)
+    hid[is.na(hid)]<-0
+    hir[is.na(hir)]<-0
+    Si.all<-cumprod(1-(hid+hir))
+    n<-length(Si.all)
+    Si.0<-c(1,Si.all[-n])
+    prob.r<-hir*Si.all
+    p.alive<-cumsum(prob.r[n:1])
+    p.alive<-p.alive[n:1]/Si.0
+    p.death<-1-p.alive
+    res<-list(p.alive=p.alive[1:Md],p.death=p.death[1:Md])
+    return(res)
+  }
+
+  nz<-length(z1)
+  alive.zt<-death.zt<-matrix(NA,M,nz)
+  for(j in 1:nz)
+  {
+    ti<-1:(M-z1[j]+1)
+    n<-length(ti)
+    probs.j<-alive(td=ti,hid=hi1.zt[z1[j],1:n],hir=hi2.zt[z1[j],1:n])
+    alive.zt[1:(M-z1[j]+1),j]<-probs.j$p.alive
+    death.zt[1:(M-z1[j]+1),j]<-probs.j$p.death
+  }
+  result<-list(alive.zt=alive.zt, death.zt=death.zt)
+  return(result)
+}
+
+## Our algorithm to estimate the rate of infection from truncated data
+## The function below is a version of hazard2D_trunc() used to compute
+## the estimation of the hospitalization rate and infection rate
+## supplied arguments (Oi.z, Ei.z1) changing depending on which of the two we want
+rate2Dmiss<-function(t.grid,z.grid,Oi.z,Ei.z1,bs.grid,cv=TRUE,
+                     epsilon=1e-4,max.ite=50)
+{
+  # Oi.z= number of hospitalized notified on the day z;
+  # Ei.z1= number new positive tested on the day z;
+  # This is the constant exposure for being hospitalized
+  ## The counting process we are interested is:
+  ## N_z(t) = number of hospitalized among people that were positive
+  ##on the day z-t+1
+  ## This process has intensity lambda_z(t)= alpha_z(t)*Ei.zt[z,1]
+  ## In our previous works: lambda_z(t)=alpha_z(t)*Ei.zt[z+t-1,t],
+  ## with Ei.zt[z+t-1,t]=Ei.zt[z+t-2,t-1]-Oi.zt[z+t-2,t-1],
+  ## in other words, the exposure is updated by removing the occurrences each day.
+  ## Now the exposure is constant and equal to the number of new positive on the day z, z=1,2,..M
+  ## We need modify this step of the old algorithm: Ei.zt[z+t-1,t]<-Ei.zt[z,1], for all t=1,2,...,M-z+1
+  ## Finally, remember we are doing time-dependent hazards, being the marker variable the notification date= z
+  
+  M<-length(Oi.z)   # total number of days considered in the sample
+  #################################################################################
+  # Construction of ocurrences and exposures
+  #################################################################################
+  
+  Oi.zt<-Ei.zt<-matrix(0,M,M) # NOT OBSERVED! only the sums by rows are!!
+  
+  ## Step 1. Initialization: construct them from an initial guess (exponential)
+  
+  for(z in 1:M) for(t in 1:(M-z+1)) Ei.zt[(z+t-1),t]<-Ei.z1[z]
+  
+  for(z in 1:M)
+  {
+    for(t in 1:(M-z+1))
+    {
+      if((Ei.zt[(z+t-1),t]>0)&(Oi.z[z+t-1]>0)) {              ### deterministic version!!
+        Oi.zt[(z+t-1),t]<-Ei.zt[(z+t-1),t]/Oi.z[(z+t-1)]
+      } else Oi.zt[(z+t-1),t]<-0
+    }
+  }
+  
+  total.Oz<-rowSums(Oi.zt)
+  q.zt<-Oi.zt/total.Oz
+  q.zt[which(is.na(q.zt))]<-0
+  Oi.zt<-q.zt*Oi.z
+  Oi.zt[Ei.zt==0]<-0
+  
+  oi.zt<-ei.zt<-matrix(0,M,M)
+  
+  for(z in 1:M)
+  {
+    for(t in 1:(M-z+1))
+    {
+      ei.zt[z,t]<-Ei.zt[(z+t-1),t]
+      oi.zt[z,t]<-Oi.zt[(z+t-1),t]
+    }
+  }
+  
+  estim<-hazard2D(t.grid,z.grid,o.zt=oi.zt,e.zt=ei.zt,
+                  bs.grid,cv=cv)
+  hi.zt.0<-estim$hi.zt
+  bcv<-estim$bcv    #### before: bcv.0<-estim$bcv
+  
+  ## Step 2. Iterations until convergence or stopping criteria
+  tol<-1 #initial tolerance
+  it<-0
+  message('Running the algorithm, please be patient.')
+  while((tol>epsilon) & (it<max.ite))
+  {
+    it<-it+1
+    hi.zt<-hi.zt.0
+    #####    before: bcv<-bcv.0
+    pi.zt<-Oi.zt<-matrix(0,M,M)
+    
+    for(z in 1:M)
+    {
+      pi.zt[z,]<-hi.zt[z,]*exp(-hi.zt[z,])
+      for(t in 1:(M-z+1))
+      {
+        if((Ei.zt[(z+t-1),t]>0)&(is.na(pi.zt[z,t])==FALSE))
+        {
+          Oi.zt[(z+t-1),t]<-Ei.zt[(z+t-1),t]*pi.zt[z,t]
+        }else Oi.zt[(z+t-1),t]<-0
+      }
+    }
+    ### totals by row (should be Oi).
+    total.Oz<-rowSums(Oi.zt) # = Oi
+    q.zt<-Oi.zt/total.Oz
+    q.zt[which(is.na(q.zt))]<-0
+    #### estimated 2d-dimensional occurrences
+    Oi.zt<-q.zt*Oi.z
+    Oi.zt[Ei.zt==0]<-0
+    
+    ### Obtain the information of occurrences and exposure in terms of marker (z1) before passing on to csda13-code for hazard estimation:
+    oi.zt<-matrix(0,M,M)
+    
+    for(z in 1:M) for(t in 1:(M-z+1)) oi.zt[z,t]<-Oi.zt[(z+t-1),t]
+    
+    if (it<5){
+      estim<-hazard2D(t.grid,z.grid,o.zt=oi.zt,e.zt=ei.zt,
+                      bs.grid,cv=cv)
+    } else {
+      estim<-hazard2D(t.grid,z.grid,o.zt=oi.zt,e.zt=ei.zt,
+                      bs.grid=t(bcv),cv=FALSE)                 #### before: bs.grid=t(bcv)
+    }
+    hi.zt<-estim$hi.zt
+    bcv<-estim$bcv
+    
+    tol<-(sum( (hi.zt.0-hi.zt)^2,na.rm=T))/(sum(hi.zt.0^2,na.rm=T)+1e-6)
+    hi.zt.0<-hi.zt
+    message('Iteration ',it, '. Tolerance=',tol)
+  }
+  
+  result<-list(hi.zt=hi.zt,bcv=bcv,tol=tol,it=it,
+               # return also the last generated occurrences and exposure
+               o.zt=oi.zt,e.zt=ei.zt)
+  
+  return(result)
+}
+
+################################################################################
+##### FORECASTING
+################################################################################
+
+boot_outcome_Hosp <- function(ss, newHz.boot, RoDeath, RoRec) {
+
+  # Build artificial matrices of alphas.D and alphas.R in the time period 1:M1
+  M1 <- length(newHz.boot)
+  alphas.D <- alphas.R <- matrix(0,M1,M1)
+
+  RoDeath <- matrix(RoDeath, M1, M1)
+  RoRec <- matrix(RoRec, M1, M1)
+
+  RoDeath[is.na(RoDeath)] <- 0
+  RoRec[is.na(RoRec)] <- 0
+
+  for(z in 1:M1) {
+    alphas.D[z,z:M1] <- RoDeath[z,1:(M1-z+1)]
+    alphas.R[z,z:M1] <- RoRec[z,1:(M1-z+1)]
+  }
+
+  H.zt.boot<-D.zt.boot<-R.zt.boot <- matrix(0,M1,M1)
+  diag(H.zt.boot) <- as.integer(newHz.boot)
+
+  for (t in 1:M1) {
+    D.zt.boot[t,t] <- rbinom(1, H.zt.boot[t,t], alphas.D[t,t])
+    R.zt.boot[t,t] <- rbinom(1, H.zt.boot[t,t], alphas.R[t,t])
+  }
+
+  for(z in 1:(M1-1)) {
+    for(t in (z+1):(M1)) {
+      H.zt.boot[z,t] <- H.zt.boot[z,t-1] - D.zt.boot[z,t-1]-R.zt.boot[z,t-1]
+      D.zt.boot[z,t] <- H.zt.boot[z,t]*alphas.D[z,t]
+      R.zt.boot[z,t] <- H.zt.boot[z,t]*alphas.R[z,t]
+
+    }
+  }
+
+  H.zt <- colSums(H.zt.boot)
+  D.zt <- colSums(D.zt.boot)
+  R.zt <- colSums(R.zt.boot)
+
+  return(list(H.zt=H.zt,D.zt=D.zt,R.zt=R.zt))
+
+}
+
+################################################################################
+################################################################################
+
+.lambda.fun<-function(N0,mu.zt)
+{
+  lambda.z<-c(N0)
+  M<-nrow(mu.zt)
+  lambda.zt<-matrix(0,M,M)
+  for(z0 in 1:M){
+    for(t in 1:(M-z0+1))
+    { lambda.zt[t+z0-1,t]<-lambda.z[z0]*mu.zt[t+z0-1,t]}
+    lambda.z<-c(lambda.z,sum(lambda.zt[z0,],na.rm=T))
+  }
+  return(lambda.z)
+}
+
+.boot_k_hawkes_Inf<-function(seed,ss,N0,mu.zt,k,a,b)
+{
+  N.z<-c(N0)
+  lambda.z<-c(N0)
+
+  set.seed(ss+seed)
+  M<-nrow(mu.zt)
+
+  lambda.zt<-matrix(0,M,M)
+  for(z0 in 1:M){
+    for(t in 1:(M-z0+1)){ lambda.zt[t+z0-1,t]<-N.z[z0]*mu.zt[t+z0-1,t] }
+    new.lambda<-sum(lambda.zt[z0,],na.rm=T)
+    new.Naz<-rpois(n=1,lambda=a*new.lambda)
+    new.Nbz<-rpois(n=1,lambda=b*new.lambda)
+    N.z<-c(N.z,new.Naz+k*new.Nbz)
+    lambda.z<-c(lambda.z,new.lambda)
+  }
+
+  res<-list(N.z=N.z,lambda.z=lambda.z)
+  return(res)
+}
+
+.boot_hawkes_Hosp<-function(seed,ss,P.z,mu.zt)
+{ ## P.z= the observed infections
+
+  set.seed(ss+seed)
+  M<-nrow(mu.zt)
+  P.zt<-matrix(0,M,M)
+  for(z in 1:M){P.zt[z,1:z]<-P.z[z:1]}
+
+  lambda.z<-rowSums(P.zt*mu.zt,na.rm=T)
+  Hz.boot<-double(M)
+  for(z in 1:M){Hz.boot[z]<-rpois(n=1,lambda=lambda.z[z])}
+
+  res<-list(N.z=Hz.boot,lambda2.z=lambda.z)##
+  return(res)
+}
+
+.boot_outcome_Hosp <- function(ss, newHz.boot, RoDeath, RoRec) {
+
+  # Build artificial matrices of alphas.D and alphas.R in the time period 1:M1
+  M1 <- length(newHz.boot)
+  alphas.D <- alphas.R <- matrix(0,M1,M1)
+
+  RoDeath <- matrix(RoDeath, M1, M1)
+  RoRec <- matrix(RoRec, M1, M1)
+
+  RoDeath[is.na(RoDeath)] <- 0
+  RoRec[is.na(RoRec)] <- 0
+
+  for(z in 1:M1) {
+    alphas.D[z,z:M1] <- RoDeath[z,1:(M1-z+1)]
+    alphas.R[z,z:M1] <- RoRec[z,1:(M1-z+1)]
+  }
+
+  H.zt.boot<-D.zt.boot<-R.zt.boot <- matrix(0,M1,M1)
+  diag(H.zt.boot) <- as.integer(newHz.boot)
+
+  for (t in 1:M1) {
+    D.zt.boot[t,t] <- rbinom(1, H.zt.boot[t,t], alphas.D[t,t])
+    R.zt.boot[t,t] <- rbinom(1, H.zt.boot[t,t], alphas.R[t,t])
+  }
+
+  for(z in 1:(M1-1)) {
+    for(t in (z+1):(M1)) {
+      H.zt.boot[z,t] <- H.zt.boot[z,t-1] - D.zt.boot[z,t-1]-R.zt.boot[z,t-1]
+      D.zt.boot[z,t] <- H.zt.boot[z,t]*alphas.D[z,t]
+      R.zt.boot[z,t] <- H.zt.boot[z,t]*alphas.R[z,t]
+
+    }
+  }
+
+  H.zt <- colSums(H.zt.boot)
+  D.zt <- colSums(D.zt.boot)
+  R.zt <- colSums(R.zt.boot)
+
+  return(list(H.zt=H.zt,D.zt=D.zt,R.zt=R.zt))
+
+}
+
+.boot.samples <- function(RoInf,RoHosp=NULL,RoDeath=NULL,RoRec=NULL,
+                         Pz,newHz=NULL,Hz=NULL,Dz=NULL,Rz=NULL,B,seed) {
+
+  M1<- length(Pz)
+  Ei.z<-Pz
+  delay<-1;M<-M1-delay
+  Oi.z<-Ei.z[-(1:delay)]; Ei.z1<-Ei.z[1:M];
+
+  RInf<-matrix(RoInf,M,M)
+
+  mu1.zt <- matrix(0, M, M)
+  for (z in 1:M) {
+    for(t in 1:z)
+      mu1.zt[z,t] <- RoInf[z-t+1, t]
+  }
+
+  N0 <- Pz[1]
+  lambda1.z<-.lambda.fun(N0=N0,mu.zt=mu1.zt)
+  g<-(1/M1)*sum((Pz[1:M1]-lambda1.z)^2/lambda1.z,na.rm=T)
+
+  k<-g+1
+  b<-(g-1)/(k*(k-1))
+  a<-1-k*b
+
+  boot.array<-array(NA, dim = c(M1, 5, B))
+  for(ss in 1:B) {
+    Pz.boot <- .boot_k_hawkes_Inf(seed=seed,ss=ss,N0=N0,mu.zt=mu1.zt,k=k,a=a,b=b)$N.z
+    boot.array[,1,ss] <- Pz.boot
+  }
+
+  if (!is.null(RoHosp) & !is.null(newHz)) {
+
+    M1<-nrow(RoHosp)
+    RHosp<-matrix(RoHosp,M1,M1)
+    mu2.zt <- matrix(0, M1, M1)
+    for (z in 1:M1) {
+      for(t in 1:z)
+        mu2.zt[z,t] <- RoHosp[z-t+1, t]
+    }
+
+    M1<-nrow(mu2.zt)
+    Pz.mat<-matrix(0,M1,M1)
+
+    Pz.M1<-Pz[1:M1]
+    for(z in 1:M1)
+    {Pz.mat[z,1:z]<-Pz.M1[z:1]}
+    lambda2.z<-rowSums(Pz.mat*mu2.zt,na.rm=T)
+
+    for(ss in 1:B) {
+      newHz.boot <- .boot_hawkes_Hosp(seed=seed,ss=ss,P.z=boot.array[,1,ss],mu.zt=mu2.zt)$N.z
+      boot.array[,2,ss] <- newHz.boot
+    }
+
+    if (!is.null(RoDeath) & !is.null(RoRec) & !is.null(Hz) & !is.null(Dz) & !is.null(Rz)) {
+
+      for(ss in 1:B) {
+        Dz.Rz.boot <- .boot_outcome_Hosp(ss=ss,newHz.boot=boot.array[,2,ss],RoDeath=RoDeath,RoRec=RoRec)
+        boot.array[,3,ss] <- Dz.Rz.boot$H.zt
+        boot.array[,4,ss] <- Dz.Rz.boot$D.zt
+        boot.array[,5,ss] <- Dz.Rz.boot$R.zt
+      }
+
+    }
+
+  }
+
+  return(boot.array)
+
+}
+
+
+.predict<-function(Cval,period,Pz,newHz=NULL,Hz=NULL,Rz=NULL,Dz=NULL,
+                  RoInf,RoHosp=NULL,RoDeath=NULL,RoRec=NULL)
+
+{ ## PZ= will be mainly bootstrap infection samples
+  ## newHz= will be mainly bootstrap new hospitalized
+  ## Hz= will be mainly bootstrap hospitalized
+  ## Rz= will be mainly bootstrap recovered samples
+  ## Dz= will be mainly bootstrap deceased samples
+
+  ###   First estimate the infection rate:
+  M1<-length(Pz)
+  delay<-1;M<-M1-delay
+
+  Oi.z<-Pz[-(1:delay)]
+  Ei.z1<-Pz[1:M];
+  t.grid<-z.grid<-1:M
+
+  M <- nrow(RoInf)
+
+  Pz.obs <- Pz[1:M1]
+
+  alphas.I <- matrix(0, M, M)
+  for (j in 1:M) {alphas.I[j, j:M] <- RoInf[j, 1:(M - j + 1)] }
+  late.estim.I <- alphas.I[, M]
+
+  Pz.fitted <- colSums(Pz.obs[1:M] * alphas.I, na.rm = T)
+
+  v.C <- 1 + ((Cval - 1)/period) * (1:period)
+
+  Aux2 <- Aux1 <- matrix(0, period + M, period)
+  for (j in 1:period) { Aux1[(j + 1):(j + M), j] <- late.estim.I  }
+  for (k in 1:period) { Aux2[(k + 1):(k + M), k] <- v.C[k]}
+
+  fc.alphas.I <- Aux1 * Aux2
+  Pz.pred <- Pz
+  z <- 1
+  while (z <= period) {
+    new.Pz.pred <- sum(Pz.pred * fc.alphas.I[1:length(Pz.pred), z], na.rm = T)
+    Pz.pred <- c(Pz.pred, new.Pz.pred)
+    z <- z + 1
+  }
+
+  newHz.pred <- rep(NA, length(M1+period))
+  Hz.pred <- rep(NA, length(M1+period))
+  Dz.pred <- rep(NA, length(M1+period))
+  Rz.pred <- rep(NA, length(M1+period))
+
+  if (!is.null(RoHosp) & !is.null(newHz)) {
+
+    ## 2. Predict the new hospitalized.
+
+    Oi.z<-as.integer(newHz)
+    Ei.z1<-Pz
+    M1<-length(Oi.z)
+    t.grid<-z.grid<-1:M1
+
+    alphas.H <- matrix(0, M1, M1)
+    for (j in 1:M1) {alphas.H[j, j:M1] <- RoHosp[j, 1:(M1 - j + 1)] }
+
+    newHz.fitted <- colSums(Pz.obs * alphas.H, na.rm = T)
+
+    late.estim.H <- alphas.H[, M1]
+    fc.alphas.H <- matrix(0, M1 + period, period)
+    for (j in 1:period) {
+      fc.alphas.H[(j + 1):(j + M1), j] <- late.estim.H
+    }
+
+    newHz.pred <- colSums(Pz.pred[1:(M1 + period)] * fc.alphas.H, na.rm = T)
+    newHz.pred <- c(newHz.fitted, newHz.pred)
+
+    Hz.pred <- rep(NA, length(M1+period))
+    Dz.pred <- rep(NA, length(M1+period))
+    Rz.pred <- rep(NA, length(M1+period))
+
+    if (!is.null(RoDeath) & !is.null(RoRec) & !is.null(Dz) & !is.null(Rz) & !is.null(Hz)) {
+
+
+      alphas.D<-alphas.R<-matrix(0,M1,M1)
+      for(z in 1:M1){
+        alphas.D[z,z:M1]<-RoDeath[z,1:(M1-z+1)]
+        alphas.R[z,z:M1]<-RoRec[z,1:(M1-z+1)]
+      }
+
+      late.estim.D<-alphas.D[,M1]
+      late.estim.R<-alphas.R[,M1]
+      fc.alphas.D<-matrix(0,M1+period,period)
+      fc.alphas.R<-matrix(0,M1+period,period)
+      for(z in 1:period){
+        fc.alphas.D[(z+1):(z+M1),z]<-late.estim.D
+        fc.alphas.R[(z+1):(z+M1),z]<-late.estim.R}
+
+      # all together:
+      zeros<-matrix(0,period,M1)
+      alphas.pred.D<-rbind(alphas.D,zeros)
+      alphas.pred.D<-cbind(alphas.pred.D,fc.alphas.D)
+      alphas.pred.R<-rbind(alphas.R,zeros)
+      alphas.pred.R<-cbind(alphas.pred.R,fc.alphas.R)
+
+      D.zt<-R.zt<-H.zt<-matrix(0,M1+period,M1+period)
+      diag(H.zt)<-newHz.pred
+      diag(D.zt)<-diag(H.zt)*diag(alphas.pred.D)
+      diag(R.zt)<-diag(H.zt)*diag(alphas.pred.R)
+
+      for(z in 1:(M1+period-1)){
+        for(t in (z+1):(M1+period)){
+          H.zt[z,t]<-H.zt[z,t-1]-D.zt[z,t-1]-R.zt[z,t-1]
+          D.zt[z,t]<-H.zt[z,t]*alphas.pred.D[z,t]
+          R.zt[z,t]<-H.zt[z,t]*alphas.pred.R[z,t]
+        }
+      }
+      Dz.pred<-colSums(D.zt,na.rm=T)
+      Rz.pred<-colSums(R.zt,na.rm=T)
+      Hz.pred<-colSums(H.zt,na.rm=T)
+
+    }
+
+  }
+
+  return(data.frame(Pz.pred = c(Pz.fitted,Pz.pred[M1:(M+1+period)]), newHz.pred = newHz.pred, Hz.pred=Hz.pred, Dz.pred=Dz.pred, Rz.pred=Rz.pred))
+
+}
+
+
+.rate.boot <- function(Pz.boot, newHz.boot=NULL, Hz.boot=NULL, Dz.boot=NULL, Rz.boot=NULL, band.matrix) {
+
+  RoInf.boot <- RoHosp.boot <- RoDeath.boot <- RoRec.boot <- NULL
+
+  M1 <- length(Pz.boot)
+  delay <- 1; M <- M1-delay
+
+  Oi.z <- Pz.boot[-(1:delay)]
+  Ei.z1 <- Pz.boot[1:M]
+  t.grid <- z.grid <- 1:M
+
+  bs <- t(c(band.matrix[1,1], band.matrix[1,2]))
+
+  RoInf.boot <- suppressMessages(
+    invisible(rate2Dmiss(t.grid,z.grid,Oi.z,Ei.z1,bs.grid=bs,cv=FALSE)$hi.zt))
+
+  if (!is.null(newHz.boot) & !all(is.na(newHz.boot))) {
+
+    Oi.z <- as.integer(newHz.boot)
+    Ei.z1 <- Pz.boot
+    M1 <- length(Oi.z)
+    t.grid <- z.grid <- 1:M1
+
+    bs <- t(c(band.matrix[2,1], band.matrix[2,2]))
+
+    RoHosp.boot <- suppressMessages(
+      invisible(rate2Dmiss(t.grid,z.grid,Oi.z,Ei.z1,bs.grid=bs,cv=FALSE)$hi.zt))
+
+    if (!is.null(Hz.boot) & !is.null(Dz.boot) & !is.null(Rz.boot) &
+        !all(is.na(Hz.boot)) & !all(is.na(Dz.boot)) & !all(is.na(Rz.boot))) {
+
+      Oi1.z <- Dz.boot
+      Oi2.z <- Rz.boot
+      Ei.z  <- Hz.boot
+
+      M1 <- length(Oi1.z)
+      #M  <- length(Ei.z)
+      t.grid <- z.grid <- 1:M1
+
+      bs <- t(c(band.matrix[3,1], band.matrix[3,2]))
+      res.h <- suppressMessages(
+        invisible(hazard2Dmiss(t.grid,z.grid,Oi1.z,Oi2.z,Ei.z,bs.grid=bs,cv=FALSE)))
+      RoDeath.boot <- res.h$hi1.zt
+      RoRec.boot   <- res.h$hi2.zt
+    }
+  }
+
+  return(list(RoInf.boot=RoInf.boot,
+              RoHosp.boot=RoHosp.boot,
+              RoDeath.boot=RoDeath.boot,
+              RoRec.boot=RoRec.boot))
+}
+
+
+forecasting <- function(Cval=1,period,RoInf,RoHosp=NULL,RoDeath=NULL,RoRec=NULL,
+                        Pz,newHz=NULL,Hz=NULL,Dz=NULL,Rz=NULL,boot=FALSE, ...) {
+
+  dots <- list(...)
+  B <- if (!is.null(dots$B)) dots$B else 500
+  seed <- if (!is.null(dots$seed)) dots$seed else 1
+  band.matrix <- if (!is.null(dots$band.matrix)) dots$band.matrix else NULL
+
+  M1 <- length(Pz)
+  M <- M1+period
+
+  if (is.null(newHz)) newHz <- rep(NA, M1)
+  if (is.null(Hz)) Hz <- rep(NA, M1)
+  if (is.null(Dz)) Dz <- rep(NA, M1)
+  if (is.null(Rz)) Rz <- rep(NA, M1)
+
+  obs <- data.frame(Pz.obs=c(Pz,rep(NA,period)),
+                    newHz.obs=c(newHz,rep(NA,period)),
+                    Hz.obs=c(Hz,rep(NA,period)),
+                    Dz.obs=c(Dz,rep(NA,period)),
+                    Rz.obs=c(Rz,rep(NA,period)))
+
+  pred <- .predict(Cval=Cval,period=period,Pz=Pz,newHz=newHz,Hz=Hz,Rz=Rz,Dz=Dz,
+                   RoInf=RoInf,RoHosp=RoHosp,RoDeath=RoDeath,RoRec=RoRec)
+
+  if (boot==TRUE) {
+
+    if (is.null(band.matrix)) {stop("argument 'band.matrix' is required when 'boot = TRUE'")}
+
+    message('Running the bootstrap algorithm, please be patient.')
+
+    samples <- .boot.samples(RoInf=RoInf,RoHosp=RoHosp,RoDeath=RoDeath,RoRec=RoRec,
+                             Pz=Pz,newHz=newHz,Hz=Hz,Dz=Dz,Rz=Rz,B=B,seed=seed)
+
+    Pz.pred.boot<-newHz.pred.boot<-Dz.pred.boot<-Rz.pred.boot <- matrix(0,M1+period,B)
+
+    for(ss in 1:B) {
+
+      rts.boot <- .rate.boot(Pz.boot=samples[,1,ss],newHz.boot=samples[,2,ss],Hz.boot=samples[,3,ss],
+                             Dz.boot=samples[,4,ss],Rz.boot=samples[,5,ss],band.matrix=band.matrix)
+
+      RoInf <- rts.boot$RoInf.boot
+      RoHosp <- rts.boot$RoHosp.boot
+      RoDeath <- rts.boot$RoDeath.boot
+      RoRec <- rts.boot$RoRec.boot
+
+      pred.boot <- .predict(Cval=Cval,period=period,Pz=samples[,1,ss],newHz=samples[,2,ss],
+                            Hz=samples[,3,ss],Rz=samples[,4,ss],Dz=samples[,5,ss],
+                            RoInf=RoInf,RoHosp=RoHosp,RoDeath=RoDeath,RoRec=RoRec)
+
+      Pz.pred.boot[,ss] <- pred.boot$Pz.pred
+      newHz.pred.boot[,ss] <- pred.boot$newHz.pred
+      Dz.pred.boot[,ss] <- pred.boot$Dz.pred
+      Rz.pred.boot[,ss] <- pred.boot$Rz.pred
+
+    }
+
+    Pz.lim<-sapply(1:(M1+period),function(i)quantile(Pz.pred.boot[i,],probs=c(0.025,0.975),na.rm=TRUE))
+    newHz.lim<-sapply(1:(M1+period),function(i)quantile(newHz.pred.boot[i,],probs=c(0.025,0.975),na.rm=TRUE))
+    Dz.lim<-sapply(1:(M1+period),function(i)quantile(Dz.pred.boot[i,],probs=c(0.025,0.975),na.rm=TRUE))
+    Rz.lim<-sapply(1:(M1+period),function(i)quantile(Rz.pred.boot[i,],probs=c(0.025,0.975),na.rm=TRUE))
+
+    pred.lim <- data.frame(Pz.PI.lwr=Pz.lim[1,],Pz.PI.upr=Pz.lim[2,],newHz.PI.lwr=newHz.lim[1,],newHz.PI.upr=newHz.lim[2,],
+                           Dz.PI.lwr=Dz.lim[1,],Dz.PI.upr=Dz.lim[2,],Rz.PI.lwr=Rz.lim[1,],Rz.PI.upr=Rz.lim[2,])
+
+    pred <- data.frame(pred,pred.lim)
+
+  }
+
+  return(data.frame(obs,pred))
+
+}
+
+
+```
+
+```{r echo=FALSE,include=FALSE, message=FALSE, warning=FALSE}
+load("C:/Users/34619/Desktop/Paquete R JRSS-A/Rcode_paper_monitoring/pandemics/data/covidAges.Rda")
+load("C:/Users/34619/Desktop/Paquete R JRSS-A/Rcode_paper_monitoring/pandemics/data/covid.Rda")
+```
+
+## Introduction
+
+The purpose of this vignette is to use the \texttt{pandemics} package to reproduce all the results presented in Gámiz, Mammen, Martínez-Miranda and Nielsen (2025): *Low quality exposure and point processes with a view to the first phase of a pandemic*. The \texttt{pandemics} package builds on the providing of a full dynamic system to describe and forecast the spread and the severity of a developing pandemic, based on available data.
+
+Data have been downloaded from the official open data platform of the French government (see \texttt{www.data.gouv.fr}). The package includes two datasets:
+
+1. \texttt{covid}. It contains counts of COVID-19 cases during the period running from 2020-03-18 to 2022-01-04. It consists of 658 observations and 5 variables: notification date, daily total number of hospitalized individuals, daily total number of in-hospital deaths, daily total number of hospital discharges, and daily total number of individuals who tested positive.
+
+2. \texttt{covidAges}. It is similar to the first one but disaggregated by four age groups during the period from 2020-03-18 to 2022-01-04. The age categories considered are: 0-39 years, 40-59 years, 60-79 years, and 80 years and older. For each age group, the dataset provides daily counts of hospitalizations, in-hospital deaths, discharges, and positive test results by notification date. It includes 658 observations and 17 variables (notification date, daily number of infections, new hospitalizations, deaths and recoveries for each of the four age groups).
+
+## Model formulation
+
+In order to facilitate the understanding of the terms mentioned throughout this document, we provide below a brief summary of the formulation of the full dynamic system, restricted here to only two processes, $N_1$ and $N_2$. These correspond to the daily number of infections and the daily number of new hospitalizations, respectively.
+
+Assume that we observe $n$ individuals in the interval $(0, T]$. Let $N_1(t)$ count the number of persons getting infected in the interval $(0, t]$, for $0 < t \leq T$. We denote by $N_1(dt)$ the number of persons infected in the interval $(t, t + dt]$.  Furthermore, we write $N_1(dt, ds)$ for the number of pairs of persons where person 1 was infected in $(s, s + ds]$ and person 2 was infected by person 1 in $(t, t + dt]$, and $N_1(t, ds)$ for the number of persons infected in $(s, t]$ by a person that was infected in $(s, s + ds]$, with $s < t \leq T$. We assume that we observe the process $N_1(t)$ but not $N_1(dt, ds)$ or $N_1(t, ds)$, and define a model for $N_1$ based on Hawkes-type processes.
+
+To define the transition model, we first introduce a $\sigma$-field, $\mathcal{F}_1(t)$ generated by $\lbrace N_1(s) : s < t \rbrace$, and
+
+$$
+\lambda_1(t) =  \lim_{dt \to 0} \dfrac{P(N_1(t + dt) - N_1(t) \geq 1 \mid \mathcal{F}_1(t))}{dt}, \quad 0 < t \leq T.
+$$
+
+Then $\lambda_1(t)dt = E[N_1(dt) \mid \mathcal{F}_1(t)]$ is the probability that one person is infected in the interval $(t, t + dt]$ given $\mathcal{F}_1(t)$.
+
+We assume that
+
+$$
+\lambda_1(t)dt = \Biggl(\int_{0}^{t^{-}} \mu_1\left( \frac{t}{T}, t - s\right) N_1(ds)\Biggr)dt + n \rho_1(t)dt,
+$$
+
+where $\mu_1$ and $\rho_1$ are some unknown functions. We have that $\mu_1(t/T, t - s)dt$ is the probability that a person infected at $s$ infects a person in $(t, t + dt]$. This rate is assumed to have two dimensions: a one-dimensional marker (typically the notification date) and time (duration).
+
+The estimator for the two-dimensional transition intensities in the described model, $\mu_1(t/T,t-s)$, works when individual follow-up is available. This means that the estimator of the infection rate is applicable when information is recorded on the time elapsed from when a person becomes infected until he/she causes a new infection. In what follows, we will refer to this situation as "full information".
+
+In case of full information, we observe the process $N_1(t, ds)$, for $s < t \leq T$. For $s$ fixed, $N_1(t, ds)$ is a counting process with respect to a (right continuous, increasing and complete) filtration $\mathcal{F}_1(t)$, with $t \in (0, T)$. We consider the two-dimensional local linear estimator given by:
+
+$$
+\hat{\mu}_1(t/T, t-s) = \dfrac{\int_{0\leq v < u \leq T} C_1(s, t, v, u)K_{1, b_1}(t - u)K_{2, b_2}(t-s-(u-v))N_1(du, dv)}{\int_{0\leq v < u \leq T} C_1(s, t, v, u)K_{1, b_1}(t - u)K_{2, b_2}(t-s-(u-v))N_1(dv)du},
+$$
+with $N_1(du,dv)$ and $N_1(dv)$ as defined previously.
+
+Since this estimator consists of a ratio of smoothed occurrences and smoothed exposure, the data are assumed to be aggregated in terms of occurrences and exposures. To reconstruct the unobserved durations appearing in the aforementioned equation, the estimator operates iteratively, following the iterative estimation schemed described in Subsection 4.2. (Eq. (4) and Eq. (5)) in Gámiz et al. (2025):
+
+1. Use an initial guess $\hat{\mu}_1^{(0)}$ of $\mu_1$.
+
+2. The $r$-th iteration of the algorithm consists of two steps:
+
+    - We estimate $N_1(du, dv)$ using the estimator $\hat{\mu}_1^{(r)}$ from the previous iteration and by using the observed process $N_1(t)$ as follows:
+
+      $$
+      \hat{N}_1^{(r)}(du, dv) = \dfrac{\hat{\mu}_1^{(r-1)}(u/T, u-v)}{\int_{0}^{u^{-}} \hat{\mu}_1^{(r-1)}(u/T, u-w)N_1(dw)}N_1(dv)N_1(du).
+      $$
+    
+    - The estimator of $N_1(du, dv)$ is plugged into the expression of $\hat{\mu}_1(t/T, t-s)$, providing the following update of $\hat{\mu}^{(r-1)}_1$, resulting:
+
+$$
+\hat{\mu}_1^{(r)}(t/T, t-s) = \dfrac{\int_{0\leq v < u \leq T} C_1(s, t, v, u)K_{1, b_1}(t - u)K_{2, b_2}(t-s-(u-v))\hat{N}_1^{(r)}(du, dv)}{\int_{0\leq v < u \leq T} C_1(s, t, v, u)K_{1, b_1}(t - u)K_{2, b_2}(t-s-(u-v))N_1(dv)du}.
+$$
+
+On the other hand, let $N_2(t)$ count the number of persons hospitalized in the interval $(0, t]$, for $0 < t \leq T$. We denote by $N_2(dt)$ the number of persons hospitalized in the interval $(t, t + dt]$. We write $N_2(dt, ds)$ for the number of persons hospitalized in $(t, t + dt]$ that had been infected in $(s, s + ds]$, and $N_2(t, ds)$ for the number of persons infected in $(s, t]$ that enter the hospital in the interval $(s,t]$, with $s < t \leq T$. We assume that we observe the process $N_1(t)$ and $N_2(t)$ for the whole interval $(0, T]$ but not $N_2(dt, ds)$.
+
+Let define
+
+$$
+\lambda_2(t) =  \lim_{dt \to 0} \dfrac{P(N_2(t + dt) - N_2(t) \geq 1 \mid \mathcal{F}_1(t))}{dt}, \quad 0 < t \leq T.
+$$
+
+Then $\lambda_2(t)dt = E[N_2(dt) \mid \mathcal{F}_1(t)]$ is the probability that one person is hospitalized in the interval $(t, t + dt]$ given $\mathcal{F}_1(t)$.
+
+Assume that
+
+$$
+\lambda_2(t)dt = \Biggl(\int_{0}^{t^{-}} \mu_2\left( \frac{t}{T}, t - s\right) N_1(ds)\Biggr)dt + n \rho_2(t)dt,
+$$
+
+with $\mu_2$ and $\rho_2$ are some unknown functions. In this case, $\mu_2(t/T, t - s)dt$ is the probability that a person, who was infected at $s$, is hospitalized in the interval $(t, t + dt]$.
+
+The estimation of the transition intensity $\mu_2$ follows a similar approach to $\mu_1$. Specifically, to estimate this transition we employ the iterative algorithm outlined in Subsection 4.3.
+
+1. Use an initial guess $\hat{\mu}_2^{(0)}$ of $\mu_2$.
+
+2. The $r$-th iteration of the algorithm consists of two steps:
+
+    - We estimate $N_2(du, dv)$ using the estimator $\hat{\mu}_2^{(r)}$ from the previous iteration and by using the observed process $N_1(t)$ and $N_2(t)$ as follows:
+
+      $$
+      \hat{N}_2^{(r)}(du, dv) = \dfrac{\hat{\mu}_2^{(r-1)}(u/T, u-v)}{\int_{0}^{u^{-}} \hat{\mu}_1^{(r-1)}(u/T, u-w)N_1(dw)}N_1(dv)N_2(du).
+      $$
+      
+    - The estimator of $N_2(du, dv)$ is plugged into the expression of $\hat{\mu}_2(t/T, t-s)$, providing the following update of $\hat{\mu}^{(r-1)}_2$, resulting:
+
+$$
+\hat{\mu}_2^{(r)}(t/T, t-s) = \dfrac{\int_{0\leq v < u \leq T} C_1(s, t, v, u)K_{1, b_1}(t - u)K_{2, b_2}(t-s-(u-v))\hat{N}_2^{(r)}(du, dv)}{\int_{0\leq v < u \leq T} C_1(s, t, v, u)K_{1, b_1}(t - u)K_{2, b_2}(t-s-(u-v))N_1(dv)du}.
+$$
+
+## Principles of forecasting in a dynamic environment
+
+Assume that we have the estimation of the dynamic infection rate, $\hat{\mu}_1(t/T, u)$, for $0 < u \leq t \leq t^{\ast}$, where $t^{\ast}$ denotes the calendar time corresponding to the most recent estimate. We fix the forecasting horizon at time $t^{\ast} + h$, with $h > 0$. By extrapolating the dynamic infection rate $\hat{\mu}_1((t^{\ast} + s)/T, u)$, for $u \geq 0$ and $0 < s \leq h$, and assuming that the infection rate at the end of the forecasting period equals to the most recent estimate multiplied by a number $C_{t^{\ast}, h}$, we obtain:
+
+$$
+\tilde{\mu}_1((t^{\ast} + s))/T, u) = \hat{\mu}_1(t^{\ast}/T,u) \times \biggl(1 + (C_{t^{\ast}, h} - 1)\dfrac{s}{h}\biggr),
+$$
+
+for $u \geq 0$ and $0 < s \leq h$.
+
+Forecasting can be performed by setting $C_{t^{\ast},h} = 1$. Alternatively, information from expert knowledge can motivate the use of a value of $C_{t^{\ast},h}$ different from one. Values below 1 reflect a reduction in the infection rate, whereas values above 1 point to an increase, compared to the dynamic infection rate evaluated in the most recent estimate $\hat{\mu}_1(t/T, t^{\ast})$.
+
+If, in addition, we want to assess uncertainty associated with the forecasts, we can generate bootstrap samples from the number of infections on the $i$th day, $N_{1,i}$. To account for the substantial overdispersion relative to the Hawkes model, the bootstrap algorithm described in Subsection 7.3 consists of the following steps:
+
+1. Take $k > \gamma$, being $\gamma$ the overdispersion factor
+
+$$
+\gamma = (1/T)\sum_{i = 1}^T \dfrac{(N_{1,i}-\lambda_{1,i})^2}{\lambda_{1,i}},
+$$
+where $N_{1,i}$ is the number of infections at the $i$th day, $i = 1, 2, \ldots, T$, and $\lambda_{1,i}$ is the expected number of infections on the $i$th day, given $N_{1,0}, \ldots, N_{1,i-1}$.
+
+2. Define $\beta = (\gamma - 1)/(k(k-1))$, and $\alpha = 1 - k\beta$.
+
+3. Given $N_{1,0}, N^{\ast}_{1,1}, \ldots, N^{\ast}_{1,i-1}$, generate a bootstrap sample with $N^{\ast}_{1,\alpha,i} \rightarrow Pois(\alpha\lambda^{\ast}_{1,i})$, and $N^{\ast}_{1,\beta,i} \rightarrow Pois(\beta\lambda^{\ast}_{1,i})$, being $\lambda^{\ast}_{1,i} = N_{1,0}\hat{\mu}_1(i,i) + N^{\ast}_{1,1}\hat{\mu}_1(i,i-1) + \ldots + N_{1,i-1}\hat{\mu}_1(i,1)$ the expected number of infections at the $i$th day given $N_{1,0}, N^{\ast}_{1,1}, \ldots, N^{\ast}_{1,i-1}$. Define $N^{\ast}_{1,i} = N^{\ast}_{1,\alpha,i} + k N^{\ast}_{1,\beta,i}$.
+
+Repeating step 3 above a large number of times, we are able to compute 95\% prediction limits by evaluating the 2.5\% and 97.5\% quantiles of the bootstrap samples at each day in the forecasting horizon.
+
+When forecasting hospitalizations, the bootstrap procedure requires a slight adjustment. In this case, the sample consists of pairs of the form $\lbrace (N_{1,0},N_{2,0}), \ldots, (N_{1,T},N_{2,T})\rbrace$, where $N_{1,i}$ denotes the number of infections on the $i$th day, and $N_{2,i}$ the number of new hospitalizations on the $i$th day, for $i = 1, 2, \ldots, T$. From these, we generate bootstrap samples that incorporate this additional step:
+
+4. Given $N_{1,0}, N^{\ast}_{1,1}, \ldots, N^{\ast}_{1,i-1}$, generate a bootstrap sample with $N^{\ast}_{2,i} \rightarrow Pois(\lambda^{\ast}_{2,i})$, with $\lambda^{\ast}_{2,i} = N_{1,0}\hat{\mu}_2(i,i) + N^{\ast}_{1,1}\hat{\mu}_2(i,i-1) + \ldots + N_{1,i-1}\hat{\mu}_2(i,1)$.
+
+## Figure 2: dynamic estimation of the rate of infection
+
+To reproduce the dynamic estimation of the infection rate, we use the function \texttt{rate2Dmiss} included in the \texttt{pandemics} package. This function implements the dynamic local linear estimator of the infection (or the hospitalization) rate in the case of missing-survival-link data (Gámiz et al. 2025). The rate is assumed to have two dimensions: a one-dimensional marker (typically the notification date) and time (duration) (see Eq. (3) in Subsection 4.1.).
+
+To estimate the infection rate, we only consider daily counts of individuals who tested positive, since we estimate the infection rate describing the transition loop from infected to infected. Firstly, we need to define an exposure vector and an occurrence vector. The exposure vector, \texttt{Ei.z1}, will contain the daily positive counts. Meanwhile, the occurrences vector, \texttt{Oi.z}, will represent the daily number of positive cases, excluding the first $d$ days to account for a typical delay. In our case, we will consider \texttt{delay = 1}, since an infected individual may become infected one day after testing positive. 
+
+It is common to observe, in several COVID datasets, a large variation in the number of reported infections depending on the day of the week. This is particularly evident in the French COVID dataset. In the case of new infections, this variation may be due to delays in confirming cases and compiling results over the weekend. Although this variation is observed especially in the reporting of new infections, it can also be found, to a lesser extent, in the reporting of hospitalizations cases, recoveries, and hospital deaths. For this reason, in the results presented in this document, a correction is applied to these data in order to mitigate the reporting delay of cases over the weekend. This correction was proposed in Koyama et al. (2021) and, in our package, is implemented through the function \texttt{week\_effect}. This function only requires the values of a single variable and returns the same variable with the correction applied to the data. In what follows, we will always apply Koyama's correction to our data.
+
+In order to generate the dynamic local linear estimator of the infection rate, we first apply Koyama's correction to the newly infected cases. We remove the first 56 rows and the last 3 rows since there are no testing data available before May 13th, 2020, and after January 2nd, 2022. Since we want to see the dynamic local linear estimator for the entire dataset, we set the length as \texttt{M <- length(Ei.new)}, although of course, a smaller vector can also be used. After correcting for the weekend effect, we adjust the \texttt{delay} parameter, which we will set to 1.
+
+```{r eval=FALSE}
+library(pandemics)
+```
+
+```{r warning=FALSE, message = FALSE, echo = TRUE}
+data('covid')
+Ei.new<-week_effect(covid$Posit[-c(1:56, 656:658)])
+M <- length(Ei.new)
+delay<-1;M<-M-delay
+Oi.z<-Ei.new[-(1:delay)]; Ei.z1<-Ei.new[1:M]
+```
+
+To estimate the infection rate, we use the function \texttt{rate2Dmiss}. The function requires, as arguments, a vector of \texttt{M} grid points for the time dimension (\texttt{t.grid}), a vector of \texttt{M} grid points for the marker dimension (\texttt{z.grid}), and two vectors of length \texttt{M} with the number of people tested positive (\texttt{Ei.z1} and \texttt{Oi.z}). Regarding the grids, \texttt{z.grid} represents the times at which a person becomes infected, and \texttt{t.grid} represents the times at which the infected person transmits the infection to another person.
+
+In addition, the function \texttt{rate2Dmiss} requires, as an argument, a pair of bandwidths that appear in expression (5) of the two-dimensional local linear estimator. These two bandwidths can be specified manually or estimated using the cross-validation method described in Gámiz et al. (2013) through the argument \texttt{bs.grid}. For the latter, a two-dimensional grid of possible bandwidth values is proposed. Typically, the first dimension, corresponding to time, requires more smoothing in this application, while the second dimension, the one related to delay, needs to be handled more precisely.
+
+Among all possible combinations of bandwidths in the grid, cross-validation should ideally select the most appropriate pair. However, it often happens that the selected bandwidths for estimating either the infection or hospitalization rate fall at the boundaries of the grid. This suggests that the cross-validation procedure has failed to identify an optimal bandwidth and that a different range of values should be considered. In fact, in the following example, after the function is executed with the cross-validation method (\texttt{cv = TRUE}), it returns the two lowest values in the grid as the selected bandwidths.
+
+```{r warning=FALSE, message = TRUE, echo = TRUE}
+t.grid<-z.grid<-1:M
+nb1<-10;nb2<-5
+bs.grid<-expand.grid(seq(30, 2*M,length=nb2),seq(5,M,length=nb1))
+RInf<-rate2Dmiss(t.grid,z.grid,Oi.z,Ei.z1,bs.grid=bs.grid,cv=TRUE)
+RInf$bcv
+```
+
+When the cross-validation method selects one of the lower bounds of the grid, it suggests that the optimal bandwidth for estimating the infection rate lies below the current grid range. Even after testing with a different grid and adjusting parameters, the method still returns the two lowest values in the grid.
+
+```{r warning=FALSE, message = FALSE, echo = TRUE}
+nb1<-10;nb2<-5
+bs.grid<-expand.grid(seq(20, 30,length=nb2),seq(5,M,length=nb1))
+RInf<-rate2Dmiss(t.grid,z.grid,Oi.z,Ei.z1,bs.grid=bs.grid,cv=TRUE)
+RInf$bcv
+```
+
+The only solution in these cases is to iteratively adjust the grid until a suitable pair of bandwidths is obtained. This adjustment should be done carefully, avoiding large jumps in the values defined within the grid. In fact, instead of modifying the first dimension, it may be more appropriate to adjust the delay dimension next.
+
+```{r warning=FALSE, message = FALSE, echo = TRUE}
+nb1<-10;nb2<-5
+bs.grid<-expand.grid(seq(20, 30,length=nb2),seq(3,M,length=nb1))
+RInf<-rate2Dmiss(t.grid,z.grid,Oi.z,Ei.z1,bs.grid=bs.grid,cv=TRUE)
+RInf$bcv
+```
+
+If, after several attempts, the cross-validation procedure still fails or does not yield satisfactory results, the infection rate can be manually adjusted. This means specifying two bandwidths that are appropriate for the analysis goals. For example, one might choose the pair $(b_1, b_2) = (15,10)$, although other combinations such as $(b_1, b_2) = (10, 5)$ or even $(b_1, b_2) = (5, 5)$ may also be considered. Note that when a pair of bandwidths is provided directly, it is not necessary to specify a grid of values. Instead, the function \texttt{rate2Dmiss} receives a transposed vector, \texttt{bs}, with the two bandwidths.
+
+As additional arguments, the function \texttt{rate2Dmiss} also allows including a value \texttt{epsilon} representing the tolerance in the iterative algorithm described in Section 2 of this document, and an integer value \texttt{max.ite} specifying the maximum number of iterations in the iterative algorithm. By default, these values are set as \texttt{epsilon = 1e-4} and \texttt{max.ite = 50}.
+
+```{r warning=FALSE, message = FALSE, echo = TRUE}
+t.grid<-z.grid<-1:M
+bs<-t(c(15,10))
+RInf<-rate2Dmiss(t.grid,z.grid,Oi.z,Ei.z1,bs.grid=bs,cv=FALSE)
+hi.zt<-RInf$hi.zt # The estimated infection rate
+```
+
+We present the infection rate estimation in the form of a matrix, where each row corresponds to the grid points for the marker dimension, and each column represents the time elapsed until an individual infects another, i.e., the duration. In addition, the output of the \texttt{rate2Dmiss} function includes a two-dimensional vector with the bandwidth used to compute the estimator (estimated by cross-validation if \texttt{cv=TRUE}), a numeric value indicating the tolerance achieved by the algorithm, and the number of iterations performed.
+
+Once the rate of infection is estimated, we choose several notification dates. In this example, we choose May 31st, June 30th, July 31st, September 30th, December 31st and September 30th, 2021 as reference dates, although these can be modified as needed.
+
+```{r warning=FALSE, message = FALSE, echo = TRUE}
+ddates<-covid$Date[-c(1:56)]
+z1<-c(19,49,80,141,233,506)
+nz<-length(z1)
+zdates<-ddates[z1]
+t.min<-min(M-z1+1)
+ti<-1:t.min;n0<-length(ti)
+```
+
+A matrix \texttt{alpha.I} is created in order to plot the dynamic rate of infection. In this matrix, each row corresponds to the grid points for the marker dimension (\texttt{z.grid}), and each column represents the grid points for the time dimension (\texttt{t.grid}). In other words, this matrix reflects the probability that a person infected at \texttt{z} infects a person in \texttt{t}. As a final point, we produce the different estimates of the infection rate, each shown in a different color for several selected notification dates.
+
+```{r warning=FALSE, message = FALSE, echo = TRUE, fig.width=8, fig.height=5, fig.pos='h'}
+alphas.I<-matrix(NA,M,M)
+for(j in 1:M) alphas.I[j,j:M]<-hi.zt[j,1:(M-j+1)]
+alphas<-alphas.I[z1,-(1:18)]
+M2a<-ncol(alphas)
+yy<-c(0,max(alphas,na.rm=TRUE)+0.02)
+
+plot(1:M2a,alphas[nz,],type='l',ylab='',xlab='Date of notification',
+     main= 'Dynamic rate of infection',ylim=yy,lwd=2,lty=1,xaxt='n')
+axis(1,at=z1-18,labels=c(zdates))
+for (i in 2:nz) lines(1:M2a,alphas[i-1,],lwd=3,col=i,lty=i)
+legend('topright',c('Starting on date:',as.character(zdates)),
+       lty=c(NA,2:nz,1),lwd=c(NA,rep(3,nz-1),2),col=c(NA,2:nz,1),bty='n',cex=0.8)
+```
+
+
+## Figure 3: dynamic estimation of the rate of hospitalization
+
+As before, to display the figure of the dynamic estimation of the hospitalization rate, we use the function \texttt{rate2Dmiss}. In this case, and unlike the infection rate, we use daily data on new hospital admissions (\texttt{Oi.z}) as occurrences together with the daily counts of individuals who tested positive (\texttt{Ei.z1}) as exposure, since we are describing the transition from infection to hospitalization.
+
+In order to compute the daily number of new hospitalizations, we rely on the recorded data. However, in the specific case of the French dataset, we only have the total number of hospitalized individuals per day, but not the daily new hospitalizations, which are necessary to estimate the dynamic rate of hospitalization. Specifically, the number of new hospitalizations on day \texttt{i+1} can be computed as \texttt{newHi[i+1] = Hi[i+1] - newHi[i] - Di[i] - Ri[i]}, where \texttt{newHi} is the number of newly hospitalized patients, \texttt{Hi} is the total number of hospitalized individuals, \texttt{Di} is the total number of deaths, and \texttt{Ri} is the total number of recoveries.
+
+One important remark about this calculation is that, when computing the new hospitalizations, it must be done using all available observations in the dataset. In other words, the full history of processes involving the number of hospitalized patients, deaths, and recoveries cannot be lost. Once the new hospitalizations are computed, a specific period can be selected for further analysis.
+
+```{r warning=FALSE, message = FALSE, echo = TRUE}
+Hi<-covid$Hospi ; Hi<-Hi[-1]
+Ri<-diff(covid$Recov)
+Di<-diff(covid$Death)
+M2<-length(Di)
+## New hospitalizations are Hi-Ri-Di
+newHi<-Hi[-1]-(Hi[-M2]-Ri[-M2]-Di[-M2])
+newHi<-c(Hi[1],newHi)
+newHi[newHi<0]<-0; # possible inconsistency in the data
+newHi<-as.integer(newHi)
+```
+
+We remove the first 56 rows and the last 3 rows from the counts of infected individuals. Since the newly hospitalized cases computed earlier come from differenced vectors, we remove only the first 55 and the last 3 observations from these. The reason for also removing observations from the new hospitalizations is that, in the dataset we are working with, there are no infection records prior to May 13, 2020. If infection data were available together with the other variables in our dataset, the calculation would be considerably simplified, as we would not need to select specific time periods of interest. Lastly, we apply Koyama's correction to both new infections and new hospitalizations.
+
+```{r warning=FALSE, message = FALSE, echo = TRUE}
+Ei.z1<-week_effect(covid$Posit[-c(1:56, 656:658)])
+newHi <- week_effect(newHi[-c(1:55, 655:657)])
+Oi.z<-newHi
+```
+
+The function \texttt{rate2Dmiss} requires a vector of \texttt{M} grid points for the time dimension (\texttt{t.grid}), a vector of \texttt{M} grid points for the marker dimension (\texttt{z.grid}), a vector of length \texttt{M} with the number of people tested positive (\texttt{Ei.z1}), and a vector of length \texttt{M} with the number of new hospitalizations notified each day in \texttt{a.grid} (\texttt{Oi.z}). In this case, the grid \texttt{z.grid} represent the times at which a person becomes infected, and \texttt{t.grid} represents the times at which the person is can be hospitalized.
+
+For the estimation of the hospitalization rate, we directly propose a pair of bandwidths. However, as previously discussed, they can also be estimated using cross-validation along with appropriate grid adjustment.
+
+```{r warning=FALSE, message = FALSE, echo = TRUE}
+M<-length(Ei.z1)
+t.grid<-z.grid<-1:M
+bs<-t(c(15,10))
+RHosp<-rate2Dmiss(t.grid,z.grid,Oi.z,Ei.z1,bs.grid=bs,cv=FALSE)
+hi.zt<-RHosp$hi.zt # The estimated hospitalization rate
+```
+
+The hospitalization rate estimation is presented in the form of a matrix. Each row corresponds to the grid points for the marker dimension, that is, the times of infection, and each column represents the duration between when a person becomes infected and when they are admitted to the hospital.
+
+To plot the hospitalization rate, we have chosen the same days used to plot the infection rate. We select May 31st, June 30th, July 31st, September 30th, December 31st, and September 30th, 2021 as reference dates.
+
+```{r warning=FALSE, message = FALSE, echo = TRUE}
+ddates<-covid$Date[-c(1:56)]
+z1<-c(19,49,80,141,233,506)
+nz<-length(z1)
+zdates<-ddates[z1]
+t.min<-min(M-z1+1)
+ti<-1:t.min;n0<-length(ti)
+```
+
+The matrix \texttt{alpha.I} created for the case of hospitalizations has a slightly different meaning than the one created for the infection rate. In this matrix, each row corresponds to the time at which a person becomes infected (grid points for the marker dimension), and each column represents the time at which that infected person is admitted to the hospital (grid points for the time dimension). Finally, we generate various hospitalization rate estimates, each displayed in a distinct color for several chosen notification dates.
+
+```{r warning=FALSE, message = FALSE, echo = TRUE, fig.width=8, fig.height=5, fig.pos='h'}
+alphas.I<-matrix(NA,M,M) # upper-triangular matrix
+for(j in 1:M) alphas.I[j,j:M]<-hi.zt[j,1:(M-j+1)]
+alphas<-alphas.I[z1,-(1:18)]
+M2a<-ncol(alphas)
+yy<-c(0,max(alphas,na.rm=TRUE)+0.01)
+
+plot(1:M2a,alphas[nz,],type='l',ylab='',xlab='Date of notification',
+     main= 'Dynamic rate of hospitalization',ylim=yy,lwd=2,xaxt='n')
+axis(1,at=z1-18,labels=c(zdates))
+for (i in 2:nz) lines(1:M2a,alphas[i-1,],lwd=3,col=i,lty=i)
+legend('topright',c('Starting on date:',as.character(zdates)),
+       lty=c(NA,2:nz,1),lwd=c(NA,rep(3,nz-1),2),col=c(NA,2:nz,1),bty='n',cex=0.8)
+```
+
+## Figure 5: forecasts of new positives in October 2020
+
+To replicate the forecasting exercise for new positive cases, we use the \texttt{forecasting} function. This approach relies on the estimation methods presented in Section 6 and the forecasting principles outlined in Section 5 in Gámiz et al. (2025).
+
+The \texttt{forecasting} function allows generating forecasts for a given forecasting horizon. These forecasts are determined through the infection indicator $C_{t^{\ast},h}$, introduced in Section 3 of this document. This indicator will be specified through the argument \texttt{Cval}. As previously mentioned, \texttt{Cval = 1} is often not an appropriate choice for forecasting the immediate future, as will be illustrated in the figures below. However, we show the forecasts computed with it in order to illustrate the potential of this methodology. Therefore, it is advisable to specify a value greater or smaller than 1 in order to adjust the forecasts as closely as possible to reality. An appropriate choice of \texttt{Cval} is strongly related to the reported reproduction number. In the case of forecasting the daily number of infections, the infection indicator \texttt{Cval} measures how many new infections are caused by one infected individual within a given time period. For further details and its relationship with the well-known reproduction number, see Subsection 7.1 of Gámiz et al. (2025).
+
+In addition to the indicator, \texttt{Cval}, and the forecasting period, \texttt{period}, the \texttt{forecasting} function requires as input the observed data of the process. In this case, since we aim to present a forecasting exercise for the infection-to-infection loop, we only require the observed data on the daily number of new infections, namely \texttt{Pz}. Furthermore, associated with this process, we also need the estimation of the infection rate, \texttt{RoInf}, computed via the function \texttt{rate2Dmiss} as described earlier.
+
+With regard to the assessment of uncertainty, the \texttt{forecasting} function optionally allows implementing the bootstrap algorithm. This option can be enabled using the boolean argument \texttt{boot}, which is set to \texttt{FALSE} by default. When uncertainty estimation is requested, it is carried out internally within the \texttt{forecasting} function through several auxiliary functions. Broadly speaking, the function first generates bootstrap samples according to the steps described in Section 3 of this document. The number of bootstrap samples must be specified via the argument \texttt{B}, and it is recommended to use a sufficiently large number of samples. By default, the number of samples generated is 500, and they are produced with a seed value of 1, which can be optionally modified using the \texttt{seed} argument. Subsequently, for each sample, forecasts are computed with the chosen values of \texttt{Cval} and \texttt{period}. 
+
+These bootstrap forecasts rely on a bandwidth matrix, \texttt{band.matrix}, containing two bandwidths used to estimate the infection rates for the bootstrap samples. It is perfectly valid to use the same bandwidths that were employed to estimate the infection rate for the observed dataset. However, it is also possible to modify these bandwidths if desired. That said, the matrix \texttt{band.matrix} must always be included as an argument in the \texttt{forecasting} function when \texttt{boot = TRUE}; otherwise, an error message will be displayed when running the function, of the form: "argument 'band.matrix' is required when 'boot = TRUE'." Once the samples and their corresponding forecasts are obtained, the 2.5\% and 97.5\% quantiles are calculated for each day in the forecasting horizon.
+
+As its final output, the \texttt{forecasting} function returns a matrix composed of the observed data (\texttt{Pz.obs}), the fitted and predicted values (\texttt{Pz.pred}), and, when \texttt{boot = TRUE}, the lower and upper bounds of the prediction bands (\texttt{Pz.PI.lwr} and \texttt{Pz.PI.upr}). As a final remark, note that the fitted values in the output have the same length as the input vector, while the predicted values have the length of the forecasting horizon, although both are presented together in the column \texttt{Pz.pred}.
+
+For this forecasting exercise, we propose to forecast the number of new positive cases in October 2020 using the data from France, covering the period from May 13th to September 30th, since there are no testing data available before May 13th, 2020. We begin by taking the French dataset and applying Koyama's correction to this variable. We then define the exposure and occurrences. In the case of forecasting infections, both represent the daily number of new positive cases.
+
+```{r warning=FALSE, message = FALSE, echo = TRUE}
+Pi <- week_effect(covid$Posit[-c(1:56, 656:658)])
+Ms<- 141
+Ei.z<-Pi[1:Ms]
+delay<-1;Msd<-Ms-delay
+Oi.z<-Ei.z[-(1:delay)]
+Ei.z1<-Ei.z[1:Msd];
+```
+
+Next, we estimate the dynamic rate of infection using the \texttt{rate2Dmiss} function on data up to September 30th. In this case, we directly provide a pair of bandwidths, without the need to perform cross-validation, although cross-validation can also be used for the estimation.
+
+```{r warning=FALSE, message = FALSE, echo = TRUE}
+t.grid<-z.grid<-1:Msd
+bs <- t(c(5,10))
+RInf<-rate2Dmiss(t.grid,z.grid,Oi.z=Oi.z,Ei.z1=Ei.z1,bs.grid=bs,cv=FALSE)
+RoInf <- RInf$hi.zt
+```
+
+Once the estimated infection rate has been computed, we proceed to the forecasting stage using the \texttt{forecasting} function. To reproduce Figure 5 in Gámiz et al. (2025), we need to call the function twice: once with the infection indicator set to 1, and once with the optimal value of the indicator. For the first case, it is not necessary to compute prediction bands using the bootstrap algorithm, since we only require the predicted number of daily new positives under the assumption that the future will behave in the same way as the immediate past. Therefore, we only store the estimated number of new positives up to September 30th (fitted values), the predicted values for October, and the observed values up to September 30th in order to plot them.
+
+To estimate the optimal value of $C_{t^{\ast},h}$ for forecasting infections in October, we construct a grid of possible values of the indicator and identify the one that yields the smallest mean squared error with respect to the actual values in the forecasting period. The grid we have designed ranges from 0.01 to 4, taking 100 possible values of the indicator within this interval. Note that this procedure is, of course, infeasible in practice, since future data are never available. In this case, the optimal infection indicator takes the value 1.863939. Both the code required to reproduce this value and the functions needed to obtain the value of the infection indicator are available in the GitHub repository.
+
+We call the \texttt{forecasting} function using the optimal value of the infection indicator. We specify the option \texttt{boot = TRUE} in order to compute the prediction bands. We perform a total of \texttt{B = 500} bootstrap samples and store the forecasts for October along with the lower and upper bounds of the prediction bands, \texttt{Pz.PI.lwr} and \texttt{Pz.PI.upr}, respectively.
+
+```{r warning=FALSE, message = FALSE, echo = TRUE}
+Cval<-1
+period<-31  # Forecasts up to 31st October, 31 days
+Pz<-Pi[1:Ms]
+
+fore<-forecasting(Cval=1,period=period,Pz=Pz,RoInf=RoInf)
+Pz.fitted<-fore$Pz.pred[1:Ms]
+Pz.predC1<-fore$Pz.pred[(Ms+1):(Ms+period)]
+Pz.obs<-fore$Pz.obs
+
+Cval<-1.86
+band.matrix <- matrix(c(5,10),nrow =1,ncol=2)
+fore_opt<-forecasting(Cval=Cval,period=period,Pz=Pz,RoInf=RoInf,boot=TRUE,B=500,band.matrix=band.matrix)
+Pz.predCopt<-fore_opt$Pz.pred[(Ms+1):(Ms+period)]
+Pz.PI.lwr<-fore_opt$Pz.PI.lwr[(Ms+1):(Ms+period)]
+Pz.PI.upr<-fore_opt$Pz.PI.upr[(Ms+1):(Ms+period)]
+
+```
+
+We display two types of points: black dots represent observed data up to September, while white dots correspond to the number of infections recorded in October. We also display three types of lines: the black solid line shows the fitted values for the number of infections, while the black and red dotted-dashed line represents the forecasts obtained using \texttt{Cval=1} and \texttt{Cval=1.86}, respectively. We also plot the prediction bands based on the forecasts obtained with the optimal infection indicator in the bootstrap samples.
+
+```{r warning=FALSE, message = FALSE, echo = TRUE, fig.width=8, fig.height=6, fig.pos='h',}
+Sys.setlocale("LC_TIME", "C");
+ddates<-as.Date(1:(Ms+period),origin='12/05/2020',format="%d/%m/%y")
+ddates<-format(ddates,format="%D")
+
+t1<-1:(Ms+period);y1<-c(rep(NA,Ms),Pz.PI.lwr);y2<-c(rep(NA,Ms),Pz.PI.upr);m2<-length(t1)
+x21<-t1;x22<-t1[m2:1];y21<-y1;y22<-y2[m2:1]
+
+plot(1:(Ms+period),Pz.obs,lty=2,col=1,ylab='',ylim=c(0,80000),
+     main='Forecasts of new positives in October 2020 (including uncertainty)',
+     xlab='Date of notification',type='n',xaxt='n',pch=20)
+oat<-c(1,17,32,47,62,78,93,109,124,139,154,170)
+olab<-ddates[oat]
+axis(1,at=oat,labels=olab)
+
+points(1:(Ms+period),Pz.obs,pch=20,col='black')
+lines(1:Ms,Pz.fitted,lty=1,col=1,lwd=2)
+polygon(c(x21,x22,x21[1]),c(y21,y22,y21[1]),col='mistyrose',border=F)
+lines((Ms+1):(Ms+period),Pz.predC1,lty=4,lwd=2,col=1)
+lines((Ms+1):(Ms+period),Pz.predCopt,lty=2,lwd=2,col=2)
+
+Pz.obsOct<- Pi[(Ms+1):(Ms+period)]
+points((Ms+1):(Ms+period),Pz.obsOct,pch=21)
+
+legend('topleft',c('Daily number of new positives until 30th September (adjusted for weekday effect)',
+                   'Daily number of new positives in October (adjusted for weekday effect)',
+  'Estimated number of new positives until 30th September',
+  paste0('Forecasts with C[t*,h]=',Cval,' (optimal to predict new positives in the period 1-31 October)'),
+  paste0('Forecasts with C[t*,h]=',1),
+  paste0('95% Prediction bands using C[t*,h]=',Cval)),
+  col=c(1,1,1,2,1,'mistyrose'),lty=c(NA,NA,1,2,4,1),
+  lwd=c(NA,NA,2,2,2,2),pch=c(20,21,NA,NA,NA,NA),bty='n',cex=0.8)
+
+```
+
+## Figure 6: forecasts of new hospitalizations in October 2020
+
+We now present a final forecasting exercise. In this case, the focus is on the number of new hospitalizations over the same period as before, from May 13 to September 30, with the goal of forecasting the daily counts for the month of October. As in the previous scenario, we use the \texttt{forecasting} function to calculate forecasts and incorporate uncertainty through the bootstrap scheme. Following the latter, the steps to be carried out for new hospitalizations are very similar to those for new infections. The only difference is the addition of a fourth step to the bootstrap method described in detail in Subsection 7.3 of Gámiz et al. (2025).
+
+We begin by estimating the hospitalization rate. For this, what we need are the observed data on the daily number of infections and the daily number of new hospitalizations. The latter has already been calculated in the estimation of the dynamic rate of hospitalization and stored in the variable \texttt{newHi}. To this end, we select the estimation and forecasting periods from our data and specify the bandwidths used for their estimation. As in the previous case, cross-validation can be carried out for the hospitalization rate, but we directly provide a pair of bandwidths.
+
+```{r warning=FALSE, message = FALSE, echo = TRUE}
+Ms<- 141
+Ei.z1 <- Pi[1:Ms]
+Oi.z <- newHi[1:Ms]
+
+t.grid<-z.grid<-1:Ms
+bs <- t(c(5,10))
+RHosp<-rate2Dmiss(t.grid,z.grid,Oi.z=Oi.z,Ei.z1=Ei.z1,bs.grid=bs,cv=FALSE)
+RoHosp <- RHosp$hi.zt
+```
+
+We next estimate the optimal value of $C_{t^{\ast},h}$ for forecasting hospitalizations in October. By again applying a grid of possible indicator values and using the mean squared error as the measure of error, we arrive at the estimation that, for October 2020, a value of $C_{t^{\ast},h}=3.07303$ is obtained. Similar to the infection indicator, the necessary code to reproduce and obtain the value of this indicator can be found in the GitHub repository. As before, this value can only be obtained if the data for the forecasting period in which this methodology is to be applied are available. Otherwise, expert information must be incorporated through the dynamic indicator to improve the forecasts and make them as realistic as possible. See Subsection 7.1 of Gámiz et al. (2025) for further details and its relationship with the well-known reproduction number.
+
+To make forecasts using the \texttt{forecasting} function, in the case of forecasting the number of new hospitalizations, the function requires as arguments the value \texttt{Cval}, the \texttt{period} argument, the observed data on the daily number of new infections and new hospitalizations, \texttt{Pz} and \texttt{newHz}, and the estimated matrices for the rates of infection and hospitalization, \texttt{RoInf} and \texttt{RoHosp}, respectively. To establish the prediction intervals on the forecasts with the indicator value, \texttt{boot=TRUE} must be selected, along with the number of bootstrap samples to be computed and the bandwidths matrix. As a note on the estimation of the bootstrap samples, the argument \texttt{band.matrix} allows the inclusion not only of the pair of bandwidths for estimating the dynamic rate of infection, but also the pair of bandwidths for estimating the hospitalization rate. It is sufficient to specify the pair of bandwidths for infections in the first row and the pair of bandwidths for hospitalizations in the second row.
+
+As before, the \texttt{forecasting} function returns a matrix composed of the observed data (\texttt{Pz.obs} and \texttt{newHz.obs}), the fitted and predicted values (\texttt{Pz.pred} and \texttt{newHz.pred}), and, when \texttt{boot = TRUE}, the lower and upper bounds of the prediction bands for both new infections and new hospitalizations.
+
+```{r warning=FALSE, message = FALSE, echo = TRUE}
+Cval<-1
+period<-31
+Pz<-Pi[1:Ms]
+newHz<-newHi[1:Ms]
+
+fore<-forecasting(Cval=Cval,period=period,Pz=Pz,newHz=newHz,
+                  RoInf=RoInf,RoHosp=RoHosp)
+newHz.fitted<-fore$newHz.pred[1:Ms]
+newHz.predC1<-fore$newHz.pred[(Ms+1):(Ms+period)]
+newHz.obs<-fore$newHz.obs
+
+Cval<-3.07
+band.matrix <- matrix(c(5,5,10,10),nrow=2,ncol=2)
+fore_opt<-forecasting(Cval=Cval,period=period,Pz=Pz,newHz=newHz,
+                  RoInf=RoInf,RoHosp=RoHosp,boot=TRUE,B=500,band.matrix=band.matrix)
+newHz.predCopt<-fore_opt$newHz.pred[(Ms+1):(Ms+period)]
+newHz.PI.lwr<-fore_opt$newHz.PI.lwr[(Ms+1):(Ms+period)]
+newHz.PI.upr<-fore_opt$newHz.PI.upr[(Ms+1):(Ms+period)]
+```
+
+Lastly, we display two types of points: black dots represent observed data up to September, while white dots correspond to the number of hospitalizations recorded in October. We also display three types of lines: the black solid line shows the fitted values for the number of hospitalizations, while the black and red dotted-dashed line represents the forecast obtained using \texttt{Cval=1} and \texttt{Cval=3.07}, respectively. We also plot the prediction bands for the forecasts.
+
+```{r warning=FALSE, message = FALSE, echo = TRUE, fig.width=8, fig.height=6, fig.pos='h'}
+Sys.setlocale("LC_TIME", "C");
+ddates<-as.Date(1:(Ms+period),origin='12/05/2020',format="%d/%m/%y")
+ddates<-format(ddates,format="%D")
+
+t1<-1:(Ms+period);y1<-c(rep(NA,Ms),newHz.PI.lwr);y2<-c(rep(NA,Ms),newHz.PI.upr);m2<-length(t1)
+x21<-t1;x22<-t1[m2:1];y21<-y1;y22<-y2[m2:1]
+
+plot(1:(Ms+period),newHz.obs,lty=2,col=1,ylab='',ylim=c(0,4500),
+     main='Forecasts of new hospitalizations in October 2020
+     (including uncertainty)',
+     xlab='Date of notification',type='n',xaxt='n',pch=20)
+oat<-c(1,17,32,47,62,78,93,109,124,139,154,170)
+olab<-ddates[oat]
+axis(1,at=oat,labels=olab)
+
+points(1:(Ms+period),newHz.obs,pch=20,col='black')
+lines(1:Ms,newHz.fitted,lty=1,col=1,lwd=2)
+polygon(c(x21,x22,x21[1]),c(y21,y22,y21[1]),col='mistyrose',border=F)
+lines((Ms+1):(Ms+period),newHz.predC1,lty=4,lwd=2,col=1)
+lines((Ms+1):(Ms+period),newHz.predCopt,lty=2,lwd=2,col=2)
+
+newHz.obsOct<- newHi[(Ms+1):(Ms+period)]
+points((Ms+1):(Ms+period),newHz.obsOct,pch=21)
+
+legend('topleft',c('Daily number of new hospitalized until 30th September (adjusted for weekday effect)',
+                   'Daily number of new hospitalized in October (adjusted for weekday effect)',
+  'Estimated number of new hospitalizations until 30th September',
+  paste0('Forecasts with C[t*,h]=',Cval,' (optimal to predict new hospitalizations in the period 1-31 October)'),
+  paste0('Forecasts with C[t*,h]=',1),
+  paste0('95% Prediction bands using C[t*,h]=',Cval)),
+  col=c(1,1,1,2,1,'mistyrose'),lty=c(NA,NA,1,2,4,1),
+  lwd=c(NA,NA,2,2,2,2),pch=c(20,21,NA,NA,NA,NA),bty='n',cex=0.8)
+```
+
+## Figure 7: forecasts of new positives in October 2020 using the R number
+
+To generate forecasts of new positives in October 2020 using the R-number, it is enough to build on the previous code lines and apply the \texttt{forecast} function with two different values of the infection indicator: one corresponding to the optimal value of 1.86, and another equal to the R-number, 1.34. This R-number value is taken as the average of the reported R-numbers calculated with data not later than 31st of October. See Subsection 7.1. and Subsection 7.4.
+
+```{r warning=FALSE, message = FALSE, echo = TRUE}
+Ms<- 141
+Pz <- Pi[1:Ms]
+
+Cval<-1.86
+period<-31  # Forecasts up to 31st October, 31 days
+
+fore<-forecasting(Cval=Cval,period=period,Pz=Pz,RoInf=RoInf)
+Pz.fitted<-fore$Pz.pred[1:Ms]
+Pz.predCopt<-fore$Pz.pred[(Ms+1):(Ms+period)]
+Pz.obs<-fore$Pz.obs
+
+Cval<-1.34
+fore_R<-forecasting(Cval=Cval,period=period,Pz=Pz,RoInf=RoInf)
+Pz.predR<-fore_R$Pz.pred[(Ms+1):(Ms+period)]
+```
+
+The figure display two forecast lines: the red dashed line reflects forecasts using the optimal infection indicator (\texttt{Cval=1.86}), while the blue dotted line shows forecasts derived from the R-number.
+
+```{r warning=FALSE, message = FALSE, echo = TRUE, fig.width=8, fig.height=6, fig.pos='h',}
+ddates<-as.Date(1:(Ms+period),origin='12/05/2020',format="%d/%m/%y")
+ddates<-format(ddates,format="%D")
+
+plot(1:(Ms+period),Pz.obs,lty=2,col=1,ylab='',ylim=c(0,70000),
+     main='Forecasts of new positives in October 2020 (including uncertainty)',
+     xlab='Date of notification',type='n',xaxt='n',pch=20)
+oat<-c(1,17,32,47,62,78,93,109,124,139,154,170)
+olab<-ddates[oat]
+axis(1,at=oat,labels=olab)
+
+points(1:(Ms+period),Pz.obs,pch=20,col='black')
+lines(1:Ms,Pz.fitted,lty=1,col=1,lwd=2)
+lines((Ms+1):(Ms+period),Pz.predCopt,lty=2,lwd=2,col=2)
+lines((Ms+1):(Ms+period),Pz.predR,lty=3,lwd=2,col=4)
+
+points((Ms+1):(Ms+period),Pz.obsOct,pch=21)
+
+legend('topleft',c('Daily number of new positives until 30th September (adjusted for weekday effect)',
+                   'Daily number of new positives in October (adjusted for weekday effect)',
+  'Estimated number of new positives until 30th September',
+  'Forecasts with C[t*,h]=1.86 (optimal to predict new positives in the period 1-31 October)',
+  'Forecasts with the R-number'),
+  col=c(1,1,1,2,4),lty=c(NA,NA,1,2,3),
+  lwd=c(NA,NA,2,2,2),pch=c(20,21,NA,NA,NA),bty='n',cex=0.8)
+
+```
+
+\newpage
+
+## References
+
+\begin{enumerate}
+
+\item[] Gámiz, M. L., Janys, L., Martínez-Miranda, M. D. and Nielsen, J. P. (2013). Bandwidth selection in marker dependent kernel hazard estimation, {\it Computational Statistics \& Data Analysis}, 68, 155-169.
+
+\item[] Gámiz, M. L., Mammen, E., Martínez-Miranda, M. D., and Nielsen, J. P. (2025). Low quality exposure and point processes with a view to the first phase of a pandemic.
+
+\item[] Koyama, S., Horie, T., Shinomoto, S. (2021). Estimating the time-varying reproduction number of COVID-19 with a state-space method. {\it PLoS computational biology}, 17(1), e1008679.
+
+\end{enumerate}
+
