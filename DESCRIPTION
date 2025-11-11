@@ -1,0 +1,47 @@
+Package: pandemics
+Type: Package
+Title: Monitoring a Developing Pandemic with Available Data
+Version: 0.2.0
+Authors@R: c(
+              person("María Luz","Gámiz",
+                      email="mgamiz@ugr.es",
+                      role = c("aut","cph")),
+              person("Enno","Mammen",
+                      email="mammen@math.uni-heidelberg.de",
+                      role = c("aut","cph")),
+              person("María Dolores","Martínez-Miranda",
+                      email="mmiranda@ugr.es",
+                      role = c("aut","cph")),
+              person("Jens Perch","Nielsen",
+                      email="Jens.Nielsen.1@city.ac.uk",
+                      role = c("aut","cph")),
+              person("Michael","Scholz",
+                      email="michael.scholz@tugraz.at",
+                      role = c("aut","cph")),
+              person("Germán Ernesto","Silva-Gómez",
+                      email="germansilva@correo.ugr.es",
+                      role = c("aut", "cre","cph"))
+            )
+Author: María Luz Gámiz [aut, cph],
+        Enno Mammen [aut, cph],
+        María Dolores Martínez-Miranda [aut, cph],
+        Jens Perch Nielsen [aut, cph],
+        Michael Scholz [aut, cph],
+        Germán Ernesto Silva-Gómez [aut, cre, cph]
+Maintainer: Germán Ernesto Silva-Gómez <germansilva@correo.ugr.es>
+Description: Full dynamic system to describe and forecast the spread and the severity
+    of a developing pandemic, based on available data. These data are number of infections, 
+    hospitalizations, deaths and recoveries notified each day. The system consists of three 
+    transitions, infection-infection, infection-hospital and hospital-death/recovery. 
+    The intensities of these transitions are dynamic and estimated using non-parametric local
+    linear estimators. The package can be used to provide forecasts and survival indicators 
+    such as the median time spent in hospital and the probability that a patient who has been
+    in hospital for a number of days can leave it alive. Methods are described in Gámiz, 
+    Mammen, Martínez-Miranda and Nielsen (2025) <doi:10.48550/arXiv.2308.09918> and Gámiz, 
+    Mammen, Martínez-Miranda, Nielsen, Scholz and Silva-Gómez (2025)
+    <doi:10.48550/arXiv.2308.09919>.
+License: GPL-2
+Encoding: UTF-8
+LazyData: true
+URL: https://github.com/germansilva-gomez/pandemics
+Depends: R (>= 3.5.0)

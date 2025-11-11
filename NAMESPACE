@@ -1,0 +1,4 @@
+exportPattern("^[[:alpha:]]+")
+importFrom("stats", "quantile", "rbinom", "rpois")
+export(forecasting,hazard2D,hazard2Dmiss,medtime,
+poutcome,rate2Dmiss,week_effect)
