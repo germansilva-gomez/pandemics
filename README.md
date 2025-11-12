@@ -16,7 +16,7 @@ Finally, as supplementary materials, the repository also includes:
 ## References
 
 Gámiz, M. L., Mammen, E., Martínez-Miranda, M. D., and Nielsen, J. P. (2025a).
-*Low quality exposure and point processes with a view to the first phase of a pandemic.*
+*Low quality exposure and point processes with a view to the first phase of a pandemic.* arXiv:2308.09918
 
 Gámiz, M. L., Mammen, E., Martínez-Miranda, M. D., Nielsen, J. P., Scholz M., and Silva-Gómez G.E. (2025b).
-*Monitoring a developing pandemic with available data*
+*Monitoring a developing pandemic with available data*. arXiv:2308.09919
